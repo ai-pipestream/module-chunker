@@ -1,6 +1,5 @@
 package ai.pipestream.module.chunker.demo;
 
-import ai.pipestream.data.util.csv.CsvDocumentLoader;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.jboss.logging.Logger;

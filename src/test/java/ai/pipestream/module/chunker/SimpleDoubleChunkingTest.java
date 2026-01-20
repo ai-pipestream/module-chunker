@@ -1,8 +1,9 @@
 package ai.pipestream.module.chunker;
 
 import ai.pipestream.data.v1.PipeDoc;
+import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
-import ai.pipestream.data.module.*;
+import ai.pipestream.data.module.v1.*;
 import ai.pipestream.module.chunker.model.ChunkerOptions;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
@@ -23,7 +24,7 @@ public class SimpleDoubleChunkingTest {
     private static final Logger log = LoggerFactory.getLogger(SimpleDoubleChunkingTest.class);
 
     @GrpcClient
-    PipeStepProcessor chunkerService;
+    PipeStepProcessorService chunkerService;
 
     @Test
     public void testSimpleDoubleChunking() throws IOException {
@@ -44,22 +45,22 @@ public class SimpleDoubleChunkingTest {
         // First chunking: Large chunks (200 chars, 50 overlap)
         PipeDoc firstChunked = performChunking(testDoc, createLargeChunkConfig(), "first-chunking");
         assertNotNull(firstChunked, "First chunking should succeed");
-        log.info("First chunking created {} semantic results", 
+        log.info("First chunking created {} semantic results",
             firstChunked.hasSearchMetadata() ? firstChunked.getSearchMetadata().getSemanticResultsCount() : 0);
 
         // Second chunking: Small chunks (100 chars, 20 overlap)
         PipeDoc doubleChunked = performChunking(firstChunked, createSmallChunkConfig(), "second-chunking");
         assertNotNull(doubleChunked, "Second chunking should succeed");
-        
+
         // Verify double chunking structure
         assertTrue(doubleChunked.hasSearchMetadata(), "Document should have search metadata");
-        assertEquals(2, doubleChunked.getSearchMetadata().getSemanticResultsCount(), 
+        assertEquals(2, doubleChunked.getSearchMetadata().getSemanticResultsCount(),
             "Document should have exactly 2 semantic result sets after double chunking");
-        
+
         // Save the result
         saveDoubleChunkedDocument(doubleChunked);
-        
-        log.info("✅ Simple double chunking test completed successfully");
+
+        log.info("Simple double chunking test completed successfully");
     }
 
     private ChunkerOptions createLargeChunkConfig() {
@@ -98,18 +99,18 @@ public class SimpleDoubleChunkingTest {
                 .build();
 
             ProcessConfiguration processConfig = ProcessConfiguration.newBuilder()
-                .setCustomJsonConfig(config.toStruct())
+                .setJsonConfig(config.toStruct())
                 .build();
 
-            ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+            ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(doc)
                 .setMetadata(metadata)
                 .setConfig(processConfig)
                 .build();
 
-            ModuleProcessResponse response = chunkerService.processData(request)
+            ProcessDataResponse response = chunkerService.processData(request)
                 .await().indefinitely();
-            
+
             if (response.getSuccess() && response.hasOutputDoc()) {
                 log.info("{} successful for doc: {}", stepName, doc.getDocId());
                 return response.getOutputDoc();

@@ -4,13 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.Struct;
 import com.google.protobuf.util.JsonFormat;
 
-import ai.pipestream.common.service.SchemaExtractorService;
-import ai.pipestream.common.util.ProcessingBuffer;
+import ai.pipestream.module.chunker.schema.SchemaExtractorService;
 import ai.pipestream.data.v1.ChunkEmbedding;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.SemanticChunk;
 import ai.pipestream.data.v1.SemanticProcessingResult;
-import ai.pipestream.data.module.*;
+import ai.pipestream.data.v1.ProcessConfiguration;
+import ai.pipestream.data.module.v1.*;
 import ai.pipestream.module.chunker.config.ChunkerConfig;
 import ai.pipestream.module.chunker.model.Chunk;
 import ai.pipestream.module.chunker.model.ChunkingResult;
@@ -33,7 +33,7 @@ import java.util.UUID;
  */
 @Singleton
 @GrpcService
-public class ChunkerGrpcImpl implements PipeStepProcessor {
+public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
     private static final Logger LOG = Logger.getLogger(ChunkerGrpcImpl.class);
 
@@ -47,141 +47,46 @@ public class ChunkerGrpcImpl implements PipeStepProcessor {
     ChunkMetadataExtractor metadataExtractor;
 
     @Inject
-    ProcessingBuffer<PipeDoc> outputBuffer;
-
-    @Inject
     SchemaExtractorService schemaExtractorService;
 
     @Override
-    public Uni<ModuleProcessResponse> processData(ModuleProcessRequest request) {
+    public Uni<ProcessDataResponse> processData(ProcessDataRequest request) {
         if (request == null) {
             LOG.error("Received null request");
             return Uni.createFrom().item(createErrorResponse("Request cannot be null", null));
         }
 
-        // Use the internal method with isTest=false
-        return processDataInternal(request, false);
-    }
+        boolean isTest = request.getIsTest();
+        String logPrefix = isTest ? "[TEST] " : "";
 
-    @Override
-    public Uni<ServiceRegistrationMetadata> getServiceRegistration(RegistrationRequest request) {
         return Uni.createFrom().item(() -> {
             try {
-                // Provide a JSONForms-ready schema for the ChunkerConfig by resolving refs
-                Optional<String> schemaOptional = schemaExtractorService.extractSchemaResolvedForJsonForms("ChunkerConfig");
+                ProcessDataResponse.Builder responseBuilder = ProcessDataResponse.newBuilder();
 
-                ServiceRegistrationMetadata.Builder registrationBuilder = ServiceRegistrationMetadata.newBuilder()
-                        .setModuleName("chunker")
-                        .setVersion("1.0.0-SNAPSHOT");
-
-                if (schemaOptional.isPresent()) {
-                    String jsonSchema = schemaOptional.get();
-                    registrationBuilder.setJsonConfigSchema(jsonSchema);
-                    registrationBuilder
-                        .setHealthCheckPassed(true)
-                        .setHealthCheckMessage("Chunker module is healthy. Returning JSONForms-ready ChunkerConfig schema.");
-                    LOG.debugf("Returned resolved ChunkerConfig schema (%d chars)", jsonSchema.length());
-                } else {
-                    registrationBuilder
-                        .setHealthCheckPassed(false)
-                        .setHealthCheckMessage("Failed to resolve ChunkerConfig schema from OpenAPI document");
-                    LOG.error("SchemaExtractorService could not resolve ChunkerConfig schema");
+                if (!request.hasDocument()) {
+                    LOG.info(logPrefix + "No document provided in request");
+                    return ProcessDataResponse.newBuilder()
+                            .setSuccess(true)
+                            .addProcessorLogs("Chunker service: no document to process. Chunker service successfully processed request.")
+                            .build();
                 }
 
-                LOG.info("Returned service registration for chunker module (JSONForms-ready schema)");
-                return registrationBuilder.build();
-
-            } catch (Exception e) {
-                LOG.error("Error getting service registration", e);
-                return ServiceRegistrationMetadata.newBuilder()
-                    .setModuleName("chunker")
-                    .setVersion("1.0.0-SNAPSHOT")
-                    .setHealthCheckPassed(false)
-                    .setHealthCheckMessage("Error getting service registration: " + e.getMessage())
-                    .build();
-            }
-        });
-    }
-
-
-    @Override
-    public Uni<ModuleProcessResponse> testProcessData(ModuleProcessRequest request) {
-        LOG.info("TestProcessData called - executing test version of chunker processing");
-
-        // For test processing, we use the same logic as processData but:
-        // 1. Don't write to any output buffers
-        // 2. Add a test marker to the logs
-        // 3. Use a test document if none provided
-
-        if (request == null || !request.hasDocument()) {
-            // Create a test document for validation
-            PipeDoc testDoc = PipeDoc.newBuilder()
-                .setDocId("test-doc-" + System.currentTimeMillis())
-                .setSearchMetadata(ai.pipestream.data.v1.SearchMetadata.newBuilder()
-                    .setBody("This is a test document for chunker validation. It contains enough text to be chunked into multiple pieces. " +
-                             "The chunker will process this text and create overlapping chunks according to the configuration. " +
-                             "This helps verify that the chunker module is functioning correctly.")
-                    .build())
-                .build();
-
-            ServiceMetadata testMetadata = ServiceMetadata.newBuilder()
-                .setStreamId("test-stream")
-                .setPipeStepName("test-step")
-                .build();
-
-            ProcessConfiguration testConfig = ProcessConfiguration.newBuilder()
-                .setCustomJsonConfig(Struct.newBuilder()
-                    .putFields("source_field", com.google.protobuf.Value.newBuilder()
-                        .setStringValue("body").build())
-                    .putFields("chunk_size", com.google.protobuf.Value.newBuilder()
-                        .setNumberValue(50).build())
-                    .putFields("overlap_size", com.google.protobuf.Value.newBuilder()
-                        .setNumberValue(10).build())
-                    .build())
-                .build();
-
-            request = ModuleProcessRequest.newBuilder()
-                .setDocument(testDoc)
-                .setMetadata(testMetadata)
-                .setConfig(testConfig)
-                .build();
-        }
-
-        // Process using regular logic but without side effects
-        return processDataInternal(request, true);
-    }
-
-    private Uni<ModuleProcessResponse> processDataInternal(ModuleProcessRequest request, boolean isTest) {
-        return Uni.createFrom().item(() -> {
-            try {
-                // Same processing logic as processData
                 PipeDoc inputDoc = request.getDocument();
                 ProcessConfiguration config = request.getConfig();
                 ServiceMetadata metadata = request.getMetadata();
                 String streamId = metadata.getStreamId();
                 String pipeStepName = metadata.getPipeStepName();
 
-                String logPrefix = isTest ? "[TEST] " : "";
-                LOG.infof("%sProcessing document ID: %s for step: %s in stream: %s", 
-                    logPrefix, 
-                    inputDoc != null && inputDoc.getDocId() != null ? inputDoc.getDocId() : "unknown", 
+                LOG.infof("%sProcessing document ID: %s for step: %s in stream: %s",
+                    logPrefix,
+                    inputDoc.getDocId() != null ? inputDoc.getDocId() : "unknown",
                     pipeStepName, streamId);
 
-                ModuleProcessResponse.Builder responseBuilder = ModuleProcessResponse.newBuilder();
-                PipeDoc.Builder outputDocBuilder = inputDoc != null ? inputDoc.toBuilder() : PipeDoc.newBuilder();
-
-                // If there's no document in non-test mode, return success but with a log message
-                if (!isTest && !request.hasDocument()) {
-                    LOG.info("No document provided in request");
-                    return ModuleProcessResponse.newBuilder()
-                            .setSuccess(true)
-                            .addProcessorLogs("Chunker service: no document to process. Chunker service successfully processed request.")
-                            .build();
-                }
+                PipeDoc.Builder outputDocBuilder = inputDoc.toBuilder();
 
                 // Parse chunker config - only support ChunkerConfig format
                 ChunkerConfig chunkerConfig;
-                Struct customJsonConfig = config.getCustomJsonConfig();
+                Struct customJsonConfig = config.getJsonConfig();
                 if (customJsonConfig != null && customJsonConfig.getFieldsCount() > 0) {
                     String jsonStr = JsonFormat.printer().print(customJsonConfig);
                     LOG.debugf("Parsing JSON config: %s", jsonStr);
@@ -196,7 +101,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessor {
                     chunkerConfig = ChunkerConfig.createDefault();
                     LOG.debugf("Using default ChunkerConfig: configId=%s", chunkerConfig.configId());
                 }
-                
+
                 LOG.debugf("Final ChunkerConfig: algorithm=%s, configId=%s", chunkerConfig.algorithm(), chunkerConfig.configId());
 
                 if (chunkerConfig.sourceField() == null || chunkerConfig.sourceField().isEmpty()) {
@@ -254,15 +159,15 @@ public class ChunkerGrpcImpl implements PipeStepProcessor {
                         currentChunkNumber++;
                     }
                     // Add semantic results to search metadata
-                    ai.pipestream.data.v1.SearchMetadata.Builder searchMetadataBuilder = 
-                        outputDocBuilder.hasSearchMetadata() ? 
-                            outputDocBuilder.getSearchMetadata().toBuilder() : 
+                    ai.pipestream.data.v1.SearchMetadata.Builder searchMetadataBuilder =
+                        outputDocBuilder.hasSearchMetadata() ?
+                            outputDocBuilder.getSearchMetadata().toBuilder() :
                             ai.pipestream.data.v1.SearchMetadata.newBuilder();
-                    
+
                     searchMetadataBuilder.addSemanticResults(newSemanticResultBuilder.build());
                     outputDocBuilder.setSearchMetadata(searchMetadataBuilder.build());
 
-                    String successMessage = isTest ? 
+                    String successMessage = isTest ?
                         String.format("%sSuccessfully created and added metadata to %d chunks for testing using %s algorithm. Chunker service validated successfully.",
                             logPrefix, chunkRecords.size(), chunkerConfig.algorithm().getValue()) :
                         String.format("%sSuccessfully created and added metadata to %d chunks from source field '%s' into result set '%s' using %s algorithm. Chunker service successfully processed document.",
@@ -278,23 +183,74 @@ public class ChunkerGrpcImpl implements PipeStepProcessor {
                 PipeDoc outputDoc = outputDocBuilder.build();
                 responseBuilder.setOutputDoc(outputDoc);
 
-                // IMPORTANT: Don't add to buffer if this is a test
-                if (!isTest) {
-                    outputBuffer.add(outputDoc);
-                }
-
                 return responseBuilder.build();
 
             } catch (Exception e) {
-                String errorMessage = String.format("Error in ChunkerService test: %s", e.getMessage());
+                String errorMessage = String.format("Error in ChunkerService: %s", e.getMessage());
                 LOG.error(errorMessage, e);
                 return createErrorResponse(errorMessage, e);
             }
         });
     }
 
-    private ModuleProcessResponse createErrorResponse(String errorMessage, Exception e) {
-        ModuleProcessResponse.Builder responseBuilder = ModuleProcessResponse.newBuilder();
+    @Override
+    public Uni<GetServiceRegistrationResponse> getServiceRegistration(GetServiceRegistrationRequest request) {
+        LOG.debug("Chunker service registration requested");
+
+        GetServiceRegistrationResponse.Builder responseBuilder = GetServiceRegistrationResponse.newBuilder()
+                .setModuleName("chunker")
+                .setVersion("1.0.0-SNAPSHOT")
+                .setCapabilities(Capabilities.newBuilder().addTypes(CapabilityType.CAPABILITY_TYPE_UNSPECIFIED).build());
+
+        // Use SchemaExtractorService to get a JSONForms-ready ChunkerConfig schema (refs resolved)
+        Optional<String> schemaOptional = schemaExtractorService.extractChunkerConfigSchemaResolvedForJsonForms();
+
+        if (schemaOptional.isPresent()) {
+            String jsonSchema = schemaOptional.get();
+            responseBuilder.setJsonConfigSchema(jsonSchema);
+            LOG.debugf("Successfully extracted JSONForms-ready schema (%d characters)", jsonSchema.length());
+            LOG.info("Returning JSON schema for chunker module (refs resolved).");
+        } else {
+            responseBuilder.setHealthCheckPassed(false);
+            responseBuilder.setHealthCheckMessage("Failed to resolve ChunkerConfig schema for JSONForms");
+            LOG.error("SchemaExtractorService could not resolve ChunkerConfig schema for JSONForms");
+            return Uni.createFrom().item(responseBuilder.build());
+        }
+
+        // If test request is provided, perform health check
+        if (request.hasTestRequest()) {
+            LOG.debug("Performing health check with test request");
+            return processData(request.getTestRequest())
+                .map(processResponse -> {
+                    if (processResponse.getSuccess()) {
+                        responseBuilder
+                            .setHealthCheckPassed(true)
+                            .setHealthCheckMessage("Chunker module is healthy - successfully processed test document");
+                    } else {
+                        responseBuilder
+                            .setHealthCheckPassed(false)
+                            .setHealthCheckMessage("Chunker module health check failed: " +
+                                String.join("; ", processResponse.getProcessorLogsList()));
+                    }
+                    return responseBuilder.build();
+                })
+                .onFailure().recoverWithItem(error -> {
+                    LOG.error("Health check failed with exception", error);
+                    return responseBuilder
+                        .setHealthCheckPassed(false)
+                        .setHealthCheckMessage("Health check failed with exception: " + error.getMessage())
+                        .build();
+                });
+        } else {
+            // No test request provided, assume healthy
+            responseBuilder.setHealthCheckPassed(true);
+            responseBuilder.setHealthCheckMessage("Chunker module is ready");
+            return Uni.createFrom().item(responseBuilder.build());
+        }
+    }
+
+    private ProcessDataResponse createErrorResponse(String errorMessage, Exception e) {
+        ProcessDataResponse.Builder responseBuilder = ProcessDataResponse.newBuilder();
         responseBuilder.setSuccess(false);
         responseBuilder.addProcessorLogs(errorMessage);
 

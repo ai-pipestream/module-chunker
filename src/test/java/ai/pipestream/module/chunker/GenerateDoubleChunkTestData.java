@@ -1,8 +1,9 @@
 package ai.pipestream.module.chunker;
 
 import ai.pipestream.data.v1.PipeDoc;
+import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
-import ai.pipestream.data.module.*;
+import ai.pipestream.data.module.v1.*;
 import ai.pipestream.module.chunker.model.ChunkerOptions;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
@@ -21,7 +22,7 @@ public class GenerateDoubleChunkTestData {
     private static final Logger log = LoggerFactory.getLogger(GenerateDoubleChunkTestData.class);
 
     @GrpcClient
-    PipeStepProcessor chunkerService;
+    PipeStepProcessorService chunkerService;
 
     @Test
     public void generateDoubleChunkedTestData() throws IOException {
@@ -47,30 +48,30 @@ public class GenerateDoubleChunkTestData {
         if (firstChunked == null) {
             throw new RuntimeException("First chunking failed");
         }
-        log.info("✅ First chunking completed");
+        log.info("First chunking completed");
 
         // Second chunking: Small chunks (100 chars, 20 overlap)
         PipeDoc doubleChunked = performChunking(firstChunked, createSmallChunkConfig(), "second-chunking");
         if (doubleChunked == null) {
             throw new RuntimeException("Second chunking failed");
         }
-        log.info("✅ Second chunking completed");
+        log.info("Second chunking completed");
 
         // Save the result with absolute path
         String projectRoot = System.getProperty("user.dir");
         Path outputDir = Paths.get(projectRoot, "modules", "chunker", "src", "test", "resources", "double_chunked_pipedocs");
         Files.createDirectories(outputDir);
-        
+
         Path outputFile = outputDir.resolve("test_double_chunked_001.pb");
         Files.write(outputFile, doubleChunked.toByteArray());
-        
-        log.info("✅ Double-chunked test data saved to: {}", outputFile.toAbsolutePath());
-        
+
+        log.info("Double-chunked test data saved to: {}", outputFile.toAbsolutePath());
+
         // Verify the structure
         if (doubleChunked.hasSearchMetadata() && doubleChunked.getSearchMetadata().getSemanticResultsCount() == 2) {
-            log.info("✅ Verification passed: Document has 2 semantic result sets");
+            log.info("Verification passed: Document has 2 semantic result sets");
         } else {
-            log.warn("⚠️ Verification failed: Expected 2 semantic result sets, got {}", 
+            log.warn("Verification failed: Expected 2 semantic result sets, got {}",
                 doubleChunked.hasSearchMetadata() ? doubleChunked.getSearchMetadata().getSemanticResultsCount() : 0);
         }
     }
@@ -111,18 +112,18 @@ public class GenerateDoubleChunkTestData {
                 .build();
 
             ProcessConfiguration processConfig = ProcessConfiguration.newBuilder()
-                .setCustomJsonConfig(config.toStruct())
+                .setJsonConfig(config.toStruct())
                 .build();
 
-            ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+            ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(doc)
                 .setMetadata(metadata)
                 .setConfig(processConfig)
                 .build();
 
-            ModuleProcessResponse response = chunkerService.processData(request)
+            ProcessDataResponse response = chunkerService.processData(request)
                 .await().atMost(java.time.Duration.ofSeconds(30));
-            
+
             if (response.getSuccess() && response.hasOutputDoc()) {
                 log.info("{} successful for doc: {}", stepName, doc.getDocId());
                 return response.getOutputDoc();

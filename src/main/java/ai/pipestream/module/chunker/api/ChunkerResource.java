@@ -5,7 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.Struct;
 import com.google.protobuf.util.JsonFormat;
 import ai.pipestream.data.v1.PipeDoc;
-import ai.pipestream.data.module.*;
+import ai.pipestream.data.v1.ProcessConfiguration;
+import ai.pipestream.data.module.v1.*;
 import io.quarkus.grpc.GrpcService;
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -37,7 +38,7 @@ public class ChunkerResource {
 
     @Inject
     @GrpcService
-    PipeStepProcessor chunkerService;
+    PipeStepProcessorService chunkerService;
 
     @Inject
     ObjectMapper objectMapper;
@@ -103,7 +104,7 @@ public class ChunkerResource {
                 Map<String, String> metadata = (Map<String, String>) input.get("metadata");
                 searchMetadataBuilder.putAllMetadata(metadata);
             }
-            
+
             // Build PipeDoc with nested structure
             PipeDoc.Builder docBuilder = PipeDoc.newBuilder()
                     .setDocId(input.getOrDefault("id", "test-doc-" + System.currentTimeMillis()).toString())
@@ -122,11 +123,11 @@ public class ChunkerResource {
                 Struct.Builder structBuilder = Struct.newBuilder();
                 JsonFormat.parser().merge(jsonString, structBuilder);
 
-                configBuilder.setCustomJsonConfig(structBuilder.build());
+                configBuilder.setJsonConfig(structBuilder.build());
             }
 
             // Build the request
-            ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+            ProcessDataRequest request = ProcessDataRequest.newBuilder()
                     .setDocument(docBuilder.build())
                     .setConfig(configBuilder.build())
                     .setMetadata(ServiceMetadata.newBuilder()
@@ -175,18 +176,18 @@ public class ChunkerResource {
     @Path("/info")
     @Operation(summary = "Get Chunker service information",
                description = "Returns basic information about the Chunker module including configuration schema")
-    @APIResponse(responseCode = "200", 
+    @APIResponse(responseCode = "200",
                  description = "Service information retrieved successfully",
                  content = @Content(mediaType = MediaType.APPLICATION_JSON))
     public Uni<Response> getServiceInfo() {
-        return chunkerService.getServiceRegistration(RegistrationRequest.newBuilder().build())
+        return chunkerService.getServiceRegistration(GetServiceRegistrationRequest.newBuilder().build())
                 .map(registration -> {
                     Map<String, Object> info = new HashMap<>();
                     info.put("moduleName", registration.getModuleName());
-                    info.put("hasSchema", registration.hasJsonConfigSchema());
+                    info.put("hasSchema", !registration.getJsonConfigSchema().isEmpty());
 
                     // Parse and include the schema if available
-                    if (registration.hasJsonConfigSchema()) {
+                    if (!registration.getJsonConfigSchema().isEmpty()) {
                         try {
                             Map<String, Object> schema = objectMapper.readValue(
                                 registration.getJsonConfigSchema(),
@@ -201,7 +202,7 @@ public class ChunkerResource {
 
                     return Response.ok(info).build();
                 })
-                .onFailure().recoverWithItem(throwable -> 
+                .onFailure().recoverWithItem(throwable ->
                     Response.serverError()
                             .entity(Map.of("error", throwable.getMessage()))
                             .build()
@@ -213,7 +214,7 @@ public class ChunkerResource {
     @Path("/health")
     @Operation(summary = "Health check",
                description = "Simple health check endpoint")
-    @APIResponse(responseCode = "200", 
+    @APIResponse(responseCode = "200",
                  description = "Service is healthy",
                  content = @Content(mediaType = MediaType.APPLICATION_JSON))
     public Response health() {

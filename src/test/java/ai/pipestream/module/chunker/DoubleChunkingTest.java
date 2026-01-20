@@ -1,7 +1,8 @@
 package ai.pipestream.module.chunker;
 
 import ai.pipestream.data.v1.PipeDoc;
-import ai.pipestream.data.module.*;
+import ai.pipestream.data.v1.ProcessConfiguration;
+import ai.pipestream.data.module.v1.*;
 import ai.pipestream.module.chunker.model.ChunkerOptions;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
@@ -32,14 +33,14 @@ public class DoubleChunkingTest {
     private static final Logger log = LoggerFactory.getLogger(DoubleChunkingTest.class);
 
     @GrpcClient
-    PipeStepProcessor chunkerService;
+    PipeStepProcessorService chunkerService;
 
     @Test
     public void testDoubleChunking() throws IOException {
         // Load parsed documents
         List<PipeDoc> parsedDocs = loadParsedDocuments();
         log.info("Loaded {} parsed documents", parsedDocs.size());
-        
+
         if (parsedDocs.isEmpty()) {
             log.warn("No parsed documents found, skipping test");
             return;
@@ -49,20 +50,20 @@ public class DoubleChunkingTest {
         List<PipeDoc> firstChunkedDocs = performFirstChunking(parsedDocs);
         log.info("First chunking produced {} documents", firstChunkedDocs.size());
 
-        // Second chunking: Small chunks (300 chars, 50 overlap) 
+        // Second chunking: Small chunks (300 chars, 50 overlap)
         List<PipeDoc> doubleChunkedDocs = performSecondChunking(firstChunkedDocs);
         log.info("Double chunking produced {} documents", doubleChunkedDocs.size());
 
         // Save double-chunked documents
         saveDoubleChunkedDocuments(doubleChunkedDocs);
-        
+
         // Verify double chunking structure
         verifyDoubleChunkingStructure(doubleChunkedDocs);
     }
 
     private List<PipeDoc> loadParsedDocuments() throws IOException {
         List<PipeDoc> docs = new ArrayList<>();
-        
+
         // Load from local test resources - process all 102 documents
         for (int i = 1; i <= 102; i++) {
             String resourceName = String.format("/parser_pipedoc_parsed/parsed_document_%03d.pb", i);
@@ -85,7 +86,7 @@ public class DoubleChunkingTest {
 
     private List<PipeDoc> performFirstChunking(List<PipeDoc> parsedDocs) {
         List<PipeDoc> chunkedDocs = new ArrayList<>();
-        
+
         // Large chunk configuration - try title if body is empty
         ChunkerOptions largeChunkConfig = new ChunkerOptions(
             "title", // sourceField - fallback to title since parsed docs may not have body
@@ -100,10 +101,10 @@ public class DoubleChunkingTest {
 
         for (PipeDoc doc : parsedDocs) {
             try {
-                ModuleProcessRequest request = createChunkerRequest(doc, largeChunkConfig, "first-chunking");
-                ModuleProcessResponse response = chunkerService.processData(request)
+                ProcessDataRequest request = createChunkerRequest(doc, largeChunkConfig, "first-chunking");
+                ProcessDataResponse response = chunkerService.processData(request)
                     .await().indefinitely();
-                
+
                 if (response.getSuccess() && response.hasOutputDoc()) {
                     chunkedDocs.add(response.getOutputDoc());
                     log.debug("First chunking successful for doc: {}", doc.getDocId());
@@ -120,7 +121,7 @@ public class DoubleChunkingTest {
 
     private List<PipeDoc> performSecondChunking(List<PipeDoc> firstChunkedDocs) {
         List<PipeDoc> doubleChunkedDocs = new ArrayList<>();
-        
+
         // Small chunk configuration - try title if body is empty
         ChunkerOptions smallChunkConfig = new ChunkerOptions(
             "title", // sourceField - fallback to title since parsed docs may not have body
@@ -135,10 +136,10 @@ public class DoubleChunkingTest {
 
         for (PipeDoc doc : firstChunkedDocs) {
             try {
-                ModuleProcessRequest request = createChunkerRequest(doc, smallChunkConfig, "second-chunking");
-                ModuleProcessResponse response = chunkerService.processData(request)
+                ProcessDataRequest request = createChunkerRequest(doc, smallChunkConfig, "second-chunking");
+                ProcessDataResponse response = chunkerService.processData(request)
                     .await().indefinitely();
-                
+
                 if (response.getSuccess() && response.hasOutputDoc()) {
                     doubleChunkedDocs.add(response.getOutputDoc());
                     log.debug("Second chunking successful for doc: {}", doc.getDocId());
@@ -153,7 +154,7 @@ public class DoubleChunkingTest {
         return doubleChunkedDocs;
     }
 
-    private ModuleProcessRequest createChunkerRequest(PipeDoc doc, ChunkerOptions config, String stepName) {
+    private ProcessDataRequest createChunkerRequest(PipeDoc doc, ChunkerOptions config, String stepName) {
         ServiceMetadata metadata = ServiceMetadata.newBuilder()
             .setPipelineName("double-chunking-test")
             .setPipeStepName(stepName)
@@ -174,10 +175,10 @@ public class DoubleChunkingTest {
             .putFields("config_id", Value.newBuilder().setStringValue(config.chunkConfigId()).build());
 
         ProcessConfiguration processConfig = ProcessConfiguration.newBuilder()
-            .setCustomJsonConfig(cfg.build())
+            .setJsonConfig(cfg.build())
             .build();
 
-        return ModuleProcessRequest.newBuilder()
+        return ProcessDataRequest.newBuilder()
             .setDocument(doc)
             .setMetadata(metadata)
             .setConfig(processConfig)

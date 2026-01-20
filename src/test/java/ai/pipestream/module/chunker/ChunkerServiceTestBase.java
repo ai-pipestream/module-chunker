@@ -3,12 +3,12 @@ package ai.pipestream.module.chunker;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Value;
 import ai.pipestream.data.v1.PipeDoc;
+import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
-import ai.pipestream.data.module.PipeStepProcessor;
-import ai.pipestream.data.module.ProcessConfiguration;
-import ai.pipestream.data.module.ModuleProcessRequest;
-import ai.pipestream.data.module.RegistrationRequest;
-import ai.pipestream.data.module.ServiceMetadata;
+import ai.pipestream.data.module.v1.PipeStepProcessorService;
+import ai.pipestream.data.module.v1.ProcessDataRequest;
+import ai.pipestream.data.module.v1.GetServiceRegistrationRequest;
+import ai.pipestream.data.module.v1.ServiceMetadata;
 import io.smallrye.mutiny.helpers.test.UniAssertSubscriber;
 import org.junit.jupiter.api.Test;
 
@@ -19,7 +19,7 @@ import static org.hamcrest.Matchers.*;
 
 public abstract class ChunkerServiceTestBase {
 
-    protected abstract PipeStepProcessor getChunkerService();
+    protected abstract PipeStepProcessorService getChunkerService();
 
     @Test
     void testProcessData() {
@@ -43,7 +43,7 @@ public abstract class ChunkerServiceTestBase {
 
         // Create configuration
         ProcessConfiguration config = ProcessConfiguration.newBuilder()
-                .setCustomJsonConfig(Struct.newBuilder()
+                .setJsonConfig(Struct.newBuilder()
                         .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
                         .putFields("sourceField", Value.newBuilder().setStringValue("body").build())
                         .putFields("chunkSize", Value.newBuilder().setNumberValue(500).build())
@@ -53,7 +53,7 @@ public abstract class ChunkerServiceTestBase {
                 .build();
 
         // Create request
-        ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+        ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(testDoc)
                 .setMetadata(metadata)
                 .setConfig(config)
@@ -75,7 +75,7 @@ public abstract class ChunkerServiceTestBase {
     @Test
     void testProcessDataWithoutDocument() {
         // Test with no document - should still succeed but with appropriate message
-        ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+        ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setMetadata(ServiceMetadata.newBuilder()
                         .setPipelineName("test-pipeline")
                         .setPipeStepName("chunker-step")
@@ -114,7 +114,7 @@ public abstract class ChunkerServiceTestBase {
                 .build();
 
         // Create request
-        ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+        ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(testDoc)
                 .setMetadata(metadata)
                 .setConfig(ProcessConfiguration.newBuilder().build())
@@ -156,7 +156,7 @@ public abstract class ChunkerServiceTestBase {
 
         // Create configuration with smaller chunk size (30 tokens > 20 overlap, but < 58 total tokens)
         ProcessConfiguration config = ProcessConfiguration.newBuilder()
-                .setCustomJsonConfig(Struct.newBuilder()
+                .setJsonConfig(Struct.newBuilder()
                         .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
                         .putFields("sourceField", Value.newBuilder().setStringValue("body").build())
                         .putFields("chunkSize", Value.newBuilder().setNumberValue(30).build())
@@ -166,7 +166,7 @@ public abstract class ChunkerServiceTestBase {
                 .build();
 
         // Create request
-        ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+        ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(testDoc)
                 .setMetadata(metadata)
                 .setConfig(config)
@@ -187,7 +187,7 @@ public abstract class ChunkerServiceTestBase {
         var result = response.getOutputDoc().getSearchMetadata().getSemanticResults(0);
         assertThat("Small chunk size should create multiple chunks", result.getChunksCount(), is(greaterThan(1)));
         assertThat("Should use custom chunk configuration ID", result.getChunkConfigId(), is(equalTo("test_small_chunks")));
-        
+
         // Verify chunk properties
         for (int i = 0; i < result.getChunksCount(); i++) {
             var chunk = result.getChunks(i);
@@ -218,7 +218,7 @@ public abstract class ChunkerServiceTestBase {
 
         // Create configuration with URL preservation enabled
         ProcessConfiguration config = ProcessConfiguration.newBuilder()
-                .setCustomJsonConfig(Struct.newBuilder()
+                .setJsonConfig(Struct.newBuilder()
                         .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
                         .putFields("sourceField", Value.newBuilder().setStringValue("body").build())
                         .putFields("chunkSize", Value.newBuilder().setNumberValue(100).build())
@@ -228,7 +228,7 @@ public abstract class ChunkerServiceTestBase {
                 .build();
 
         // Create request
-        ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+        ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(testDoc)
                 .setMetadata(metadata)
                 .setConfig(config)
@@ -255,13 +255,13 @@ public abstract class ChunkerServiceTestBase {
             if (chunkText.contains("https://example.com") || chunkText.contains("http://test.org/page.html")) {
                 foundCompleteUrl = true;
                 // Ensure URL wasn't split across chunk boundaries
-                assertThat("URLs should not be broken across chunks", 
+                assertThat("URLs should not be broken across chunks",
                     chunkText.matches(".*https?://[^\\s]+.*"), is(true));
             }
         }
-        
+
         assertThat("At least one chunk should contain complete URLs", foundCompleteUrl, is(true));
-        assertThat("Should log successful URL-aware chunking", 
+        assertThat("Should log successful URL-aware chunking",
             response.getProcessorLogsList(), hasItem(containsString("Successfully created")));
     }
 
@@ -276,23 +276,23 @@ public abstract class ChunkerServiceTestBase {
         // Null request handling should be robust and informative
         assertThat("Chunker should gracefully handle null input without crashing", response.getSuccess(), is(true));
         assertThat("Should provide diagnostic information for null request", response.getProcessorLogsList(), is(not(empty())));
-        assertThat("Should log at least one meaningful message about null handling", 
+        assertThat("Should log at least one meaningful message about null handling",
             response.getProcessorLogsList().size(), is(greaterThan(0)));
         assertThat("Should not attempt to process null as valid document", response.hasOutputDoc(), is(false));
     }
 
     @Test
     void testGetServiceRegistration() {
-        var registration = getChunkerService().getServiceRegistration(RegistrationRequest.newBuilder().build())
+        var registration = getChunkerService().getServiceRegistration(GetServiceRegistrationRequest.newBuilder().build())
                 .subscribe().withSubscriber(UniAssertSubscriber.create())
                 .awaitItem()
                 .getItem();
 
         assertThat("Service should identify itself as chunker module", registration.getModuleName(), is(equalTo("chunker")));
-        assertThat("Registration should include configuration schema for clients", registration.hasJsonConfigSchema(), is(true));
-        assertThat("Schema should contain text chunking configuration description", 
+        assertThat("Registration should include configuration schema for clients", !registration.getJsonConfigSchema().isEmpty(), is(true));
+        assertThat("Schema should contain text chunking configuration description",
             registration.getJsonConfigSchema(), containsString("Configuration for text chunking operations"));
-        assertThat("Schema should be valid JSON structure", 
+        assertThat("Schema should be valid JSON structure",
             registration.getJsonConfigSchema().length(), is(greaterThan(10)));
     }
 }

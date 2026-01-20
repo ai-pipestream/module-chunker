@@ -2,17 +2,22 @@ import org.apache.tools.ant.filters.ReplaceTokens
 import org.gradle.plugins.signing.Sign
 
 plugins {
-    id 'pl.allegro.tech.build.axion-release' version '1.21.0'
     alias(libs.plugins.java)
     alias(libs.plugins.quarkus)
     alias(libs.plugins.maven.publish)
     id 'signing'
-    id 'com.gradleup.nmcp' version '1.2.1'
+    alias(libs.plugins.nmcp.single)
+    alias(libs.plugins.axion.release)
+    alias(libs.plugins.proto.toolchain)
 }
 
+def pipestreamBomVersion = findProperty('pipestreamBomVersion')
+
+// Axion-release configuration for automatic versioning
 scmVersion {
     tag {
         prefix = 'v'
+        initialVersion { config, position -> '0.0.1' }
     }
     checks {
         uncommittedChanges = false
@@ -21,48 +26,65 @@ scmVersion {
     }
 }
 
-def pipelineBomVersion = findProperty('pipelineBomVersion') ?: '0.2.2'
+// Proto toolchain configuration - uses git-proto-workspace mode for cross-module imports
+pipestreamProtos {
+    sourceMode = 'git-proto-workspace'
+    gitRepo = "https://github.com/ai-pipestream/pipestream-protos.git"
+    gitRef = "main"
+    generateMutiny = true
+    generateDescriptors = true
+
+    modules {
+        register("common")
+        register("pipeline-module")
+    }
+}
 
 dependencies {
-    implementation 'io.quarkus:quarkus-container-image-docker'
-    // Import pipeline BOM to align all managed versions
-    implementation platform("ai.pipestream:pipeline-bom:${pipelineBomVersion}")
+    // Import pipestream BOM to align all managed versions
+    implementation platform("ai.pipestream:pipestream-bom:${pipestreamBomVersion}")
 
-    implementation 'io.quarkus:quarkus-grpc'
+    // Core Quarkus dependencies
     implementation 'io.quarkus:quarkus-arc'
-    implementation 'io.quarkus:quarkus-smallrye-health'
-    implementation 'io.quarkus:quarkus-smallrye-stork'
-
-    // REST API dependencies
+    implementation 'io.quarkus:quarkus-grpc'
     implementation 'io.quarkus:quarkus-rest'
     implementation 'io.quarkus:quarkus-rest-jackson'
+    implementation 'io.quarkus:quarkus-smallrye-health'
+    implementation 'io.quarkus:quarkus-smallrye-stork'
     implementation 'io.quarkus:quarkus-smallrye-openapi'
     implementation 'io.quarkus:quarkus-hibernate-validator'
+    implementation 'io.quarkus:quarkus-cache'
+    implementation 'io.quarkus:quarkus-container-image-docker'
 
     // Service Discovery dependencies for Consul
     implementation 'io.smallrye.stork:stork-service-discovery-consul'
     implementation 'io.smallrye.reactive:smallrye-mutiny-vertx-consul-client'
 
-    testImplementation 'io.quarkus:quarkus-junit5'
-    testImplementation 'io.rest-assured:rest-assured'
-    testImplementation libs.json.schema.validator
+    // Pipestream platform libraries
+    implementation 'ai.pipestream:pipestream-quarkus-devservices'
+    implementation 'ai.pipestream:quarkus-dynamic-grpc'
+    implementation 'ai.pipestream:pipestream-service-registration'
 
-    // Pipeline libraries (published to Maven Local)
-    testImplementation libs.pipestream.grpc.wiremock
-    // Pipestream libraries - versions managed entirely by the BOM/catalog
-    implementation libs.pipestream.compose.devservices
-    implementation libs.pipestream.grpc.stubs
-    implementation libs.pipestream.api
-    implementation libs.pipestream.data.util
-    implementation libs.pipestream.commons
-    implementation libs.pipestream.dynamic.grpc
-    implementation libs.pipestream.dynamic.grpc.registration.clients
+    // Protobuf JSON utilities
+    implementation 'com.google.protobuf:protobuf-java-util'
 
+    // OpenNLP for tokenization and sentence detection
     implementation libs.opennlp.tools
+
+    // Apache Commons utilities
     implementation libs.commons.lang3
+
+    // Testing
+    testImplementation platform("ai.pipestream:pipestream-bom:${pipestreamBomVersion}")
+    testImplementation 'io.quarkus:quarkus-junit5'
+    testImplementation 'io.quarkus:quarkus-junit5-mockito'
+    testImplementation 'io.rest-assured:rest-assured'
+    testImplementation 'com.networknt:json-schema-validator:1.0.87'
+
+    runtimeOnly libs.quarkus.logging.manager
 }
 
-group = "ai.pipestream.module"
+group = 'ai.pipestream.module'
 version = "${scmVersion.version}"
 
 java {
@@ -74,7 +96,10 @@ java {
 
 test {
     systemProperty "java.util.logging.manager", "org.jboss.logmanager.LogManager"
+    maxHeapSize = "4g"
+    jvmArgs = ["-Xmx4g", "-XX:MaxMetaspaceSize=512m", "--add-opens", "java.base/java.lang=ALL-UNNAMED"]
 }
+
 compileJava {
     options.encoding = 'UTF-8'
     options.compilerArgs << '-parameters'
@@ -90,14 +115,11 @@ tasks.withType(Javadoc).configureEach { task ->
     opts.encoding = 'UTF-8'
     opts.charSet = 'UTF-8'
     opts.locale = 'en'
-    // Suppress missing Javadoc warnings for now
     opts.addStringOption('Xdoclint:-missing', '-quiet')
-    // Exclude internal packages
     task.exclude('**/internal/**', '**/impl/**', '**/test/**')
 }
 
 // Enable resource filtering to replace @version@ in application.properties
-// Use @ delimiters to avoid conflicts with ${} runtime property placeholders
 processResources {
     filesMatching('**/*.properties') {
         filter(ReplaceTokens, tokens: [
@@ -114,20 +136,22 @@ processTestResources {
     }
 }
 
+quarkusDev {
+    jvmArgs = ["-Xmx4g", "-XX:MaxMetaspaceSize=512m", "--add-opens", "java.base/java.lang=ALL-UNNAMED"]
+}
+
 // Publishing configuration
 publishing {
     publications {
-        // Use a named publication to match signing configuration below
-        create('maven', MavenPublication) {
+        maven(MavenPublication) { publication ->
             from components.java
-            //noinspection GroovyAssignabilityCheck
             artifact(file("${buildDir}/quarkus-app/quarkus-run.jar")) { artifact ->
                 artifact.classifier = 'runner'
                 artifact.builtBy tasks.named('quarkusBuild')
             }
-            pom {
-                name.set('Module Chunker')
-                description.set('Document chunking module for the Pipeline platform')
+            pom { pom ->
+                name.set('Chunker Module')
+                description.set('Text Chunking Module for the Pipestream platform')
                 url.set('https://github.com/ai-pipestream/module-chunker')
 
                 licenses {
@@ -140,7 +164,7 @@ publishing {
                 developers {
                     developer {
                         id.set('krickert')
-                        name.set('Pipeline Engine Team')
+                        name.set('Pipestream Engine Team')
                     }
                 }
 
@@ -149,73 +173,28 @@ publishing {
                     developerConnection.set('scm:git:ssh://github.com/ai-pipestream/module-chunker.git')
                     url.set('https://github.com/ai-pipestream/module-chunker')
                 }
-
-                // Ensure BOM/platform dependency is included in dependencyManagement
-                // This ensures Maven Central can resolve dependency versions from the BOM
-                withXml {
-                    def projectNode = asNode()
-                    def dependencyManagementNodes = projectNode.get('dependencyManagement')
-                    def dmNode
-                    def depsNode
-
-                    if (dependencyManagementNodes.isEmpty()) {
-                        // Create dependencyManagement and dependencies nodes
-                        dmNode = projectNode.appendNode('dependencyManagement')
-                        depsNode = dmNode.appendNode('dependencies')
-                    } else {
-                        // Get the first dependencyManagement node
-                        dmNode = dependencyManagementNodes[0]
-                        // Check if it has a dependencies child
-                        def dependenciesNodes = dmNode.get('dependencies')
-                        if (dependenciesNodes.isEmpty()) {
-                            depsNode = dmNode.appendNode('dependencies')
-                        } else {
-                            depsNode = dependenciesNodes[0]
-                        }
-                    }
-
-                    // Check if pipeline-bom already exists
-                    def existingBom = depsNode.children().find { dep ->
-                        dep.groupId?.text() == 'ai.pipestream' &&
-                        dep.artifactId?.text() == 'pipeline-bom'
-                    }
-
-                    if (!existingBom) {
-                        def bomDependency = depsNode.appendNode('dependency')
-                        bomDependency.appendNode('groupId', 'ai.pipestream')
-                        bomDependency.appendNode('artifactId', 'pipeline-bom')
-                        bomDependency.appendNode('version', pipelineBomVersion)
-                        bomDependency.appendNode('type', 'pom')
-                        bomDependency.appendNode('scope', 'import')
-                    }
-                }
             }
         }
     }
 
     repositories {
-        // Publish to Maven Local for development
         mavenLocal()
 
-        // Conditionally add GitHub Packages repository when credentials are available
-        def ghRepo = System.getenv('GITHUB_REPOSITORY') ?: 'ai-pipestream/module-chunker'
-        def ghActor = System.getenv('GITHUB_ACTOR') ?: (project.findProperty('gpr.user') ?: System.getenv('GPR_USER'))
-        def ghToken = System.getenv('GITHUB_TOKEN') ?: (project.findProperty('gpr.key') ?: System.getenv('GPR_TOKEN'))
-        if (ghActor && ghToken) {
+        if (System.getenv("GITHUB_ACTOR") != null) {
             maven {
-                name = 'GitHubPackages'
-                url = uri("https://maven.pkg.github.com/${ghRepo}")
+                name = "GitHubPackages"
+                url = uri("https://maven.pkg.github.com/ai-pipestream/module-chunker")
                 credentials {
-                    username = ghActor
-                    password = ghToken
+                    username = System.getenv("GITHUB_ACTOR")
+                    password = System.getenv("GITHUB_TOKEN")
                 }
             }
         }
     }
 }
 
+// GPG Signing
 signing {
-    // Read org-level GPG secrets directly, so runnable apps don't need extra env mapping
     def signingKey = System.getenv("GPG_PRIVATE_KEY")
     def signingPassword = System.getenv("GPG_PASSPHRASE")
 
@@ -225,7 +204,7 @@ signing {
     }
 }
 
-// Ensure all signing tasks run before nmcp bundles and publishes artifacts
+// Ensure signing tasks run before NMCP publication
 afterEvaluate {
     tasks.matching { it.name.startsWith("nmcpZipAllPublications") || it.name.startsWith("nmcpPublishAllPublicationsToCentralPortal") }
         .configureEach { nmcpTask ->
@@ -233,6 +212,7 @@ afterEvaluate {
         }
 }
 
+// Maven Central publishing via NMCP
 nmcp {
     publishAllPublicationsToCentralPortal {
         username = providers.environmentVariable("MAVEN_CENTRAL_USERNAME")

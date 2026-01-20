@@ -1,6 +1,6 @@
 package ai.pipestream.module.chunker;
 
-import ai.pipestream.data.module.PipeStepProcessor;
+import ai.pipestream.data.module.v1.PipeStepProcessorService;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
 
@@ -9,10 +9,10 @@ import io.quarkus.test.junit.QuarkusTest;
 class ChunkerServiceTest extends ChunkerServiceTestBase {
 
     @GrpcClient("chunker")
-    PipeStepProcessor chunkerService;
+    PipeStepProcessorService chunkerService;
 
     @Override
-    protected PipeStepProcessor getChunkerService() {
+    protected PipeStepProcessorService getChunkerService() {
         return chunkerService;
     }
 }

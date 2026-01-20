@@ -1,47 +1,40 @@
 pluginManagement {
     repositories {
         gradlePluginPortal()
-        // Ensure plugins can also be resolved from Maven Central (Gradle 9+ recommendation)
-        mavenCentral()
     }
 }
 
 rootProject.name = 'module-chunker'
 
 dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+
     versionCatalogs {
         libs {
-            from("ai.pipestream:pipeline-bom-catalog:0.1.2-SNAPSHOT")
+            // Import version catalog from published BOM
+            from("ai.pipestream:pipestream-bom-catalog:${settings.gradle.startParameter.projectProperties['pipestreamBomVersion'] ?: '0.7.19-SNAPSHOT'}")
         }
     }
 
     repositories {
-        // Prefer Maven Central but allow locally published releases for development
+        // Maven Local for published ai.pipestream artifacts during development
         mavenLocal {
-            mavenContent {
-                releasesOnly()
-            }
             content {
                 includeGroupByRegex "ai\\.pipestream(\\..*)?"
             }
         }
 
+        // Maven Central (always available, default for public builds)
         mavenCentral()
 
+        // Maven Central snapshots host ai.pipestream SNAPSHOTs
         maven {
             url = uri('https://central.sonatype.com/repository/maven-snapshots/')
             mavenContent {
                 snapshotsOnly()
             }
-        }
-
-        if (System.getenv('CI_ENV') != 'internal') {
-            maven {
-                url = uri('https://repository.apache.org/content/repositories/snapshots/')
-                allowInsecureProtocol = false
-                content {
-                    includeGroupByRegex "org\\.apache\\.tika(\\..*)?"
-                }
+            content {
+                includeGroupByRegex "ai\\.pipestream(\\..*)?"
             }
         }
     }

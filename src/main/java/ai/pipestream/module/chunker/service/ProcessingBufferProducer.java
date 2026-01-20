@@ -1,7 +1,5 @@
 package ai.pipestream.module.chunker.service;
 
-import ai.pipestream.common.util.ProcessingBuffer;
-import ai.pipestream.common.util.ProcessingBufferFactory;
 import ai.pipestream.data.v1.PipeDoc;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Singleton;
@@ -32,17 +30,13 @@ public class ProcessingBufferProducer {
     @Produces
     @Singleton
     public ProcessingBuffer<PipeDoc> createPipeDocOutputBuffer() {
-        ProcessingBuffer<PipeDoc> buffer = ProcessingBufferFactory.createBuffer(
-                bufferEnabled,
-                bufferCapacity,
-                PipeDoc.class
-        );
-        
+        ProcessingBuffer<PipeDoc> buffer = new ProcessingBuffer<>(bufferEnabled, bufferCapacity);
+
         if (bufferEnabled) {
-            LOG.infof("Processing buffer enabled with capacity %d and directory %s", 
+            LOG.infof("Processing buffer enabled with capacity %d and directory %s",
                     bufferCapacity, bufferDirectory);
         }
-        
+
         return buffer;
     }
 }

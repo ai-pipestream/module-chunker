@@ -57,7 +57,7 @@ public class ChunkerServiceEndpoint {
     DemoDocumentService demoDocumentService;
     
     @Inject
-    ai.pipestream.common.service.SchemaExtractorService schemaExtractorService;
+    ai.pipestream.module.chunker.schema.SchemaExtractorService schemaExtractorService;
     
     @Inject
     ObjectMapper objectMapper;

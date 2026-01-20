@@ -3,8 +3,9 @@ package ai.pipestream.module.chunker;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Value;
 import ai.pipestream.data.v1.PipeDoc;
+import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
-import ai.pipestream.data.module.*;
+import ai.pipestream.data.module.v1.*;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
 import io.smallrye.mutiny.helpers.test.UniAssertSubscriber;
@@ -24,16 +25,16 @@ import static org.hamcrest.Matchers.*;
 public class ChunkerConfigSchemaCompatibilityTest {
 
     @GrpcClient
-    PipeStepProcessor chunkerService;
+    PipeStepProcessorService chunkerService;
 
     @Test
     void schemaShouldAdvertiseChunkerConfigFields() {
-        var registration = chunkerService.getServiceRegistration(RegistrationRequest.newBuilder().build())
+        var registration = chunkerService.getServiceRegistration(GetServiceRegistrationRequest.newBuilder().build())
             .subscribe().withSubscriber(UniAssertSubscriber.create())
             .awaitItem()
             .getItem();
 
-        assertThat("Registration should include JSON schema", registration.hasJsonConfigSchema(), is(true));
+        assertThat("Registration should include JSON schema", !registration.getJsonConfigSchema().isEmpty(), is(true));
         String schema = registration.getJsonConfigSchema();
 
         // Basic sanity checks for expected ChunkerConfig fields
@@ -82,10 +83,10 @@ public class ChunkerConfigSchemaCompatibilityTest {
             .putFields("config_id", Value.newBuilder().setStringValue(forcedConfigId).build());
 
         ProcessConfiguration processConfig = ProcessConfiguration.newBuilder()
-            .setCustomJsonConfig(cfg.build())
+            .setJsonConfig(cfg.build())
             .build();
 
-        ModuleProcessRequest request = ModuleProcessRequest.newBuilder()
+        ProcessDataRequest request = ProcessDataRequest.newBuilder()
             .setDocument(testDoc)
             .setMetadata(metadata)
             .setConfig(processConfig)
