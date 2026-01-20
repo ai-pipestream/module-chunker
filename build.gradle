@@ -79,7 +79,7 @@ dependencies {
     testImplementation 'io.quarkus:quarkus-junit5'
     testImplementation 'io.quarkus:quarkus-junit5-mockito'
     testImplementation 'io.rest-assured:rest-assured'
-    testImplementation 'com.networknt:json-schema-validator:1.0.87'
+    testImplementation 'com.networknt:json-schema-validator:3.0.0'
 
     runtimeOnly libs.quarkus.logging.manager
 }
