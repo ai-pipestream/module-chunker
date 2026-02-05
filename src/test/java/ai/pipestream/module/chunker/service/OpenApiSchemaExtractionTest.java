@@ -8,6 +8,7 @@ import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
 import ai.pipestream.module.chunker.schema.SchemaExtractorService;
 import io.quarkus.arc.Arc;
+import io.quarkus.smallrye.openapi.runtime.OpenApiConstants;
 import io.quarkus.smallrye.openapi.runtime.OpenApiDocumentService;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -51,7 +52,7 @@ public class OpenApiSchemaExtractionTest {
         assertThat("OpenApiDocumentService should be available via CDI", documentService, is(notNullValue()));
 
         // Get the full OpenAPI document as JSON
-        byte[] jsonBytes = documentService.getDocument(Format.JSON);
+        byte[] jsonBytes = documentService.getDocument(OpenApiConstants.DEFAULT_DOCUMENT_NAME, Format.JSON);
         assertThat("OpenAPI document should be generated", jsonBytes, is(notNullValue()));
         assertThat("OpenAPI document should not be empty", jsonBytes.length, is(greaterThan(0)));
 
@@ -92,7 +93,6 @@ public class OpenApiSchemaExtractionTest {
             assertThat("Should have 'sourceField' property", properties.containsKey("sourceField"), is(true));
             assertThat("Should have 'preserveUrls' property", properties.containsKey("preserveUrls"), is(true));
             assertThat("Should have 'cleanText' property", properties.containsKey("cleanText"), is(true));
-            assertThat("Should have 'config_id' property", properties.containsKey("config_id"), is(true));
 
             String extractedSchema = chunkerConfigSchema.toString();
             LOG.infof("Extracted ChunkerConfig schema (%d chars): %s", extractedSchema.length(), extractedSchema);
@@ -183,8 +183,7 @@ public class OpenApiSchemaExtractionTest {
                     "chunkSize": 500,
                     "chunkOverlap": 50,
                     "preserveUrls": true,
-                    "cleanText": true,
-                    "config_id": "token-body-500-50"
+                    "cleanText": true
                 }
                 """;
 
@@ -289,11 +288,11 @@ public class OpenApiSchemaExtractionTest {
     }
 
     /**
-     * TEST 5: Verify x-hidden extension is present on config_id field
+     * TEST 5: Verify config_id is not in schema (node_id is the identifier; opensearch-manager derives field names).
      */
     @Test
-    public void test5_verifyXHiddenExtensionOnConfigId() {
-        LOG.info("=== TEST 5: Verify x-hidden extension on config_id ===");
+    public void test5_configIdNotInSchema() {
+        LOG.info("=== TEST 5: Verify config_id is not in ChunkerConfig schema ===");
 
         String chunkerConfigSchema = extractChunkerConfigSchema();
 
@@ -302,30 +301,10 @@ public class OpenApiSchemaExtractionTest {
             JsonNode schemaNode = objectMapper.readTree(chunkerConfigSchema);
             JsonNode properties = schemaNode.get("properties");
 
-            // Check config_id property
-            JsonNode configIdProp = properties.get("config_id");
-            assertThat("config_id property should exist", configIdProp, is(notNullValue()));
-
-            // Verify x-hidden extension
-            if (configIdProp.has("x-hidden")) {
-                JsonNode xHiddenValue = configIdProp.get("x-hidden");
-                assertThat("x-hidden should be true", xHiddenValue.asBoolean(), is(true));
-                LOG.info("Found x-hidden: true on config_id field");
-            } else {
-                LOG.warn("x-hidden extension not found on config_id - this may affect form generation");
-                // This might be expected depending on how OpenAPI processes extensions
-            }
-
-            // Verify readOnly property (should be present from @Schema annotation)
-            if (configIdProp.has("readOnly")) {
-                assertThat("config_id should be readOnly", configIdProp.get("readOnly").asBoolean(), is(true));
-                LOG.info("Found readOnly: true on config_id field");
-            }
-
-            LOG.info("TEST 5 PASSED: config_id field has proper hidden/readOnly annotations");
-
+            assertThat("config_id should not be in schema (identifier is node_id)", properties.has("config_id"), is(false));
+            LOG.info("TEST 5 PASSED: config_id not present in schema");
         } catch (Exception e) {
-            throw new AssertionError("Failed to verify x-hidden extension: " + e.getMessage(), e);
+            throw new AssertionError("Failed to verify config_id absence: " + e.getMessage(), e);
         }
     }
 
@@ -395,7 +374,7 @@ public class OpenApiSchemaExtractionTest {
         OpenApiDocumentService documentService = Arc.container()
                 .instance(OpenApiDocumentService.class).get();
 
-        byte[] jsonBytes = documentService.getDocument(Format.JSON);
+        byte[] jsonBytes = documentService.getDocument(OpenApiConstants.DEFAULT_DOCUMENT_NAME, Format.JSON);
         String jsonString = new String(jsonBytes, StandardCharsets.UTF_8);
 
         try (JsonReader reader = Json.createReader(new StringReader(jsonString))) {

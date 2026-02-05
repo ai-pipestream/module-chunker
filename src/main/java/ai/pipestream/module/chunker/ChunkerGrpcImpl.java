@@ -92,17 +92,17 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     LOG.debugf("Parsing JSON config: %s", jsonStr);
                     try {
                         chunkerConfig = objectMapper.readValue(jsonStr, ChunkerConfig.class);
-                        LOG.debugf("Successfully parsed as ChunkerConfig: configId=%s", chunkerConfig.configId());
+                        LOG.debugf("Successfully parsed as ChunkerConfig: algorithm=%s", chunkerConfig.algorithm());
                     } catch (Exception e) {
                         LOG.errorf("Failed to parse JSON config as ChunkerConfig: %s", e.getMessage());
                         throw new RuntimeException("Invalid configuration format. Expected ChunkerConfig structure.", e);
                     }
                 } else {
                     chunkerConfig = ChunkerConfig.createDefault();
-                    LOG.debugf("Using default ChunkerConfig: configId=%s", chunkerConfig.configId());
+                    LOG.debugf("Using default ChunkerConfig: algorithm=%s", chunkerConfig.algorithm());
                 }
 
-                LOG.debugf("Final ChunkerConfig: algorithm=%s, configId=%s", chunkerConfig.algorithm(), chunkerConfig.configId());
+                LOG.debugf("Final ChunkerConfig: algorithm=%s, chunkSize=%s", chunkerConfig.algorithm(), chunkerConfig.chunkSize());
 
                 if (chunkerConfig.sourceField() == null || chunkerConfig.sourceField().isEmpty()) {
                     return createErrorResponse("Missing 'sourceField' in ChunkerConfig", null);
@@ -114,15 +114,16 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
                 if (!chunkRecords.isEmpty()) {
                     Map<String, String> placeholderToUrlMap = chunkingResult.placeholderToUrlMap();
+                    // Node/step (pipeStepName) is the identifier; opensearch-manager derives field names.
                     SemanticProcessingResult.Builder newSemanticResultBuilder = SemanticProcessingResult.newBuilder()
                             .setResultId(UUID.randomUUID().toString())
                             .setSourceFieldName(chunkerConfig.sourceField())
-                            .setChunkConfigId(chunkerConfig.configId());
+                            .setChunkConfigId(pipeStepName);
 
                     String resultSetName = String.format(
                             "%s_chunks_%s",
                             pipeStepName,
-                            chunkerConfig.configId()
+                            pipeStepName
                     ).replaceAll("[^a-zA-Z0-9_\\-]", "_");
                     newSemanticResultBuilder.setResultSetName(resultSetName);
 
@@ -136,7 +137,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                                 .setChunkId(chunkRecord.id())
                                 .setOriginalCharStartOffset(chunkRecord.originalIndexStart())
                                 .setOriginalCharEndOffset(chunkRecord.originalIndexEnd())
-                                .setChunkConfigId(chunkerConfig.configId());
+                                .setChunkConfigId(pipeStepName);
 
                         boolean containsUrlPlaceholder = (chunkerConfig.preserveUrls() != null && chunkerConfig.preserveUrls()) &&
                                 !placeholderToUrlMap.isEmpty() &&

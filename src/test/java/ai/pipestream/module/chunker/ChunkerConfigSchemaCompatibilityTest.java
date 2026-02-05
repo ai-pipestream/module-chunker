@@ -43,7 +43,7 @@ public class ChunkerConfigSchemaCompatibilityTest {
         assertThat(schema, containsString("chunkOverlap"));
         assertThat(schema, containsString("preserveUrls"));
         assertThat(schema, containsString("cleanText"));
-        assertThat(schema, containsString("config_id"));
+        assertThat(schema, not(containsString("config_id"))); // node_id is the identifier; opensearch-manager derives field names
 
         // Ensure legacy snake_case options are not promoted by schema (guardrail)
         assertThat(schema, not(containsString("source_field")));
@@ -71,16 +71,15 @@ public class ChunkerConfigSchemaCompatibilityTest {
             .setCurrentHopNumber(1)
             .build();
 
-        // Construct a ChunkerConfig-compatible Struct
-        String forcedConfigId = "schema_compat_chunks_v1";
+        // Construct a ChunkerConfig-compatible Struct (no config_id; node/step = pipeStepName is the identifier)
+        String pipeStepName = "schema-compat-step";
         Struct.Builder cfg = Struct.newBuilder()
             .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
             .putFields("sourceField", Value.newBuilder().setStringValue("body").build())
             .putFields("chunkSize", Value.newBuilder().setNumberValue(120).build())
             .putFields("chunkOverlap", Value.newBuilder().setNumberValue(24).build())
             .putFields("preserveUrls", Value.newBuilder().setBoolValue(true).build())
-            .putFields("cleanText", Value.newBuilder().setBoolValue(true).build())
-            .putFields("config_id", Value.newBuilder().setStringValue(forcedConfigId).build());
+            .putFields("cleanText", Value.newBuilder().setBoolValue(true).build());
 
         ProcessConfiguration processConfig = ProcessConfiguration.newBuilder()
             .setJsonConfig(cfg.build())
@@ -102,7 +101,7 @@ public class ChunkerConfigSchemaCompatibilityTest {
         assertThat("Semantic results should be created", response.getOutputDoc().getSearchMetadata().getSemanticResultsCount(), is(greaterThan(0)));
 
         var result = response.getOutputDoc().getSearchMetadata().getSemanticResults(0);
-        assertThat("Result should use provided config_id", result.getChunkConfigId(), is(equalTo(forcedConfigId)));
+        assertThat("Result chunkConfigId should be pipe step name (node id)", result.getChunkConfigId(), is(equalTo(pipeStepName)));
         assertThat("Should produce at least one chunk", result.getChunksCount(), is(greaterThan(0)));
     }
 }

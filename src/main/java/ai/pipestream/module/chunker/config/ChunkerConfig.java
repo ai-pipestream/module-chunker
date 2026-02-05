@@ -1,12 +1,9 @@
 package ai.pipestream.module.chunker.config;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.annotation.JsonAlias;
-import com.fasterxml.jackson.annotation.JsonCreator;
 import ai.pipestream.module.chunker.model.ChunkingAlgorithm;
 import ai.pipestream.module.chunker.examples.SampleDocuments;
 import io.quarkus.runtime.annotations.RegisterForReflection;
-import org.eclipse.microprofile.openapi.annotations.extensions.Extension;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Max;
@@ -84,17 +81,7 @@ public record ChunkerConfig(
         description = "Whether to clean text by normalizing whitespace and line endings before chunking", 
         defaultValue = "true"
     )
-    Boolean cleanText,
-
-    @JsonProperty("config_id")
-    @JsonAlias({"configId"})
-    @Schema(
-        description = "Auto-generated configuration identifier based on algorithm and parameters", 
-        readOnly = true,
-        examples = {"character-body-500-50", "sentence-title-1000-100", "token-body-512-64"},
-        extensions = @Extension(name = "x-hidden", value = "true")
-    )
-    String configId
+    Boolean cleanText
 ) {
     
     // Default values as constants
@@ -106,62 +93,19 @@ public record ChunkerConfig(
     public static final Boolean DEFAULT_CLEAN_TEXT = true;
 
     /**
-     * Jackson deserialization constructor - auto-generates configId when missing.
-     * This ensures that JSON without configId field will still create valid objects.
-     */
-    @JsonCreator
-    public static ChunkerConfig create(
-            @JsonProperty("algorithm") ChunkingAlgorithm algorithm,
-            @JsonProperty("sourceField") String sourceField,
-            @JsonProperty("chunkSize") Integer chunkSize,
-            @JsonProperty("chunkOverlap") Integer chunkOverlap,
-            @JsonProperty("preserveUrls") Boolean preserveUrls,
-            @JsonProperty("cleanText") Boolean cleanText,
-            @JsonProperty("config_id") @JsonAlias({"configId"}) String configId) {
-        
-        // If configId is provided, use it; otherwise auto-generate
-        String finalConfigId = (configId != null && !configId.trim().isEmpty()) ? 
-            configId : 
-            generateConfigId(
-                algorithm != null ? algorithm : DEFAULT_ALGORITHM,
-                sourceField != null ? sourceField : DEFAULT_SOURCE_FIELD,
-                chunkSize != null ? chunkSize : DEFAULT_CHUNK_SIZE,
-                chunkOverlap != null ? chunkOverlap : DEFAULT_CHUNK_OVERLAP
-            );
-            
-        return new ChunkerConfig(
-            algorithm != null ? algorithm : DEFAULT_ALGORITHM,
-            sourceField != null ? sourceField : DEFAULT_SOURCE_FIELD,
-            chunkSize != null ? chunkSize : DEFAULT_CHUNK_SIZE,
-            chunkOverlap != null ? chunkOverlap : DEFAULT_CHUNK_OVERLAP,
-            preserveUrls != null ? preserveUrls : DEFAULT_PRESERVE_URLS,
-            cleanText != null ? cleanText : DEFAULT_CLEAN_TEXT,
-            finalConfigId
-        );
-    }
-
-    /**
-     * Constructor with defaults and automatic config_id generation.
+     * Compact canonical constructor: apply defaults when null.
      */
     public ChunkerConfig(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap, Boolean preserveUrls, Boolean cleanText) {
-        this(
-            algorithm != null ? algorithm : DEFAULT_ALGORITHM,
-            sourceField != null ? sourceField : DEFAULT_SOURCE_FIELD,
-            chunkSize != null ? chunkSize : DEFAULT_CHUNK_SIZE,
-            chunkOverlap != null ? chunkOverlap : DEFAULT_CHUNK_OVERLAP,
-            preserveUrls != null ? preserveUrls : DEFAULT_PRESERVE_URLS,
-            cleanText != null ? cleanText : DEFAULT_CLEAN_TEXT,
-            generateConfigId(
-                algorithm != null ? algorithm : DEFAULT_ALGORITHM,
-                sourceField != null ? sourceField : DEFAULT_SOURCE_FIELD,
-                chunkSize != null ? chunkSize : DEFAULT_CHUNK_SIZE,
-                chunkOverlap != null ? chunkOverlap : DEFAULT_CHUNK_OVERLAP
-            )
-        );
+        this.algorithm = algorithm != null ? algorithm : DEFAULT_ALGORITHM;
+        this.sourceField = sourceField != null ? sourceField : DEFAULT_SOURCE_FIELD;
+        this.chunkSize = chunkSize != null ? chunkSize : DEFAULT_CHUNK_SIZE;
+        this.chunkOverlap = chunkOverlap != null ? chunkOverlap : DEFAULT_CHUNK_OVERLAP;
+        this.preserveUrls = preserveUrls != null ? preserveUrls : DEFAULT_PRESERVE_URLS;
+        this.cleanText = cleanText != null ? cleanText : DEFAULT_CLEAN_TEXT;
     }
 
     /**
-     * Constructor with defaults and automatic config_id generation (backwards compatibility).
+     * Constructor with defaults (backwards compatibility).
      */
     public ChunkerConfig(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap, Boolean preserveUrls) {
         this(algorithm, sourceField, chunkSize, chunkOverlap, preserveUrls, DEFAULT_CLEAN_TEXT);
@@ -182,31 +126,17 @@ public record ChunkerConfig(
     }
 
     /**
-     * Creates a configuration from basic parameters with computed config_id.
+     * Creates a configuration from basic parameters.
      */
     public static ChunkerConfig create(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap, Boolean preserveUrls) {
         return new ChunkerConfig(algorithm, sourceField, chunkSize, chunkOverlap, preserveUrls, DEFAULT_CLEAN_TEXT);
     }
 
     /**
-     * Creates a configuration from basic parameters with computed config_id (full version).
+     * Creates a configuration from basic parameters (full version).
      */
     public static ChunkerConfig create(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap, Boolean preserveUrls, Boolean cleanText) {
         return new ChunkerConfig(algorithm, sourceField, chunkSize, chunkOverlap, preserveUrls, cleanText);
-    }
-
-    /**
-     * Auto-generates the configuration ID based on algorithm and parameters.
-     * Format: {algorithm}-{sourceField}-{chunkSize}-{chunkOverlap}
-     * Examples: "character-body-500-50", "sentence-title-1000-100"
-     */
-    private static String generateConfigId(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap) {
-        return String.format("%s-%s-%d-%d", 
-            algorithm.getValue(),
-            sourceField,
-            chunkSize,
-            chunkOverlap
-        );
     }
 
     /**

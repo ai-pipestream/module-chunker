@@ -758,7 +758,7 @@ public class ChunkerServiceEndpoint {
                     config = ChunkerConfig.createDefault();
                 }
                 
-                LOG.debugf("Chunking with config ID: %s, text length: %d", config.configId(), text.length());
+                LOG.debugf("Chunking with step, text length: %d", text.length());
                 
                 // Create PipeDoc for chunking
                 PipeDoc document = PipeDoc.newBuilder()

@@ -210,19 +210,19 @@ public class OverlapChunker {
      * This is the preferred method that generates clean, semantic chunk IDs.
      * 
      * @param document The PipeDoc to chunk
-     * @param config Chunker configuration with auto-generated config_id
+     * @param config Chunker configuration (node/step identifier is pipeStepName; opensearch-manager derives field names)
      * @param streamId Stream ID for logging
      * @param pipeStepName Pipeline step name for logging
      * @return ChunkingResult containing the created chunks and URL placeholder mappings
      */
     public ChunkingResult createChunks(PipeDoc document, ChunkerConfig config, String streamId, String pipeStepName) {
-        // Convert ChunkerConfig to ChunkerOptions for internal processing
+        // Convert ChunkerConfig to ChunkerOptions for internal processing (node/step = pipeStepName is the identifier)
         ChunkerOptions options = new ChunkerOptions(
             config.sourceField(),
             config.chunkSize(),
             config.chunkOverlap(),
-            null, // We'll generate IDs directly using config.configId()
-            config.configId(),
+            null, // IDs generated using pipeStepName
+            pipeStepName,
             "%s_chunks_%s", // resultSetNameTemplate
             "chunker", // logPrefix
             config.preserveUrls()
@@ -446,16 +446,10 @@ public class OverlapChunker {
                          "due to placeholder substitutions. StreamID: %s, DocID: %s", streamId, documentId);
             }
 
-            // Generate clean, semantic chunk ID
+            // Generate clean, semantic chunk ID (node/step = options.chunkConfigId() is the identifier)
             String chunkId;
-            if (config != null) {
-                // Use ChunkerConfig for clean IDs: {configId}-{shortDocId}-{chunkIndex}
-                String shortDocId = extractShortDocumentId(documentId);
-                chunkId = String.format("%s-%s-%04d", config.configId(), shortDocId, chunkIndex++);
-            } else {
-                // Fallback to template-based ID generation
-                chunkId = String.format(options.chunkIdTemplate(), streamId, documentId, chunkIndex++);
-            }
+            String shortDocId = extractShortDocumentId(documentId);
+            chunkId = String.format("%s-%s-%04d", options.chunkConfigId(), shortDocId, chunkIndex++);
             
             chunks.add(new Chunk(chunkId, finalChunkText, originalStartOffset, originalEndOffset));
 
@@ -539,16 +533,10 @@ public class OverlapChunker {
                          "due to placeholder substitutions. StreamID: %s, DocID: %s", streamId, documentId);
             }
 
-            // Generate clean, semantic chunk ID
+            // Generate clean, semantic chunk ID (node/step = options.chunkConfigId())
             String chunkId;
-            if (config != null) {
-                // Use ChunkerConfig for clean IDs: {configId}-{shortDocId}-{chunkIndex}
-                String shortDocId = extractShortDocumentId(documentId);
-                chunkId = String.format("%s-%s-%04d", config.configId(), shortDocId, chunkIndex++);
-            } else {
-                // Fallback to template-based ID generation
-                chunkId = String.format(options.chunkIdTemplate(), streamId, documentId, chunkIndex++);
-            }
+            String shortDocId = extractShortDocumentId(documentId);
+            chunkId = String.format("%s-%s-%04d", options.chunkConfigId(), shortDocId, chunkIndex++);
             
             chunks.add(new Chunk(chunkId, finalChunkText, originalStartOffset, originalEndOffset));
 
@@ -640,14 +628,9 @@ public class OverlapChunker {
                 int originalStartOffset = chunkStartCharOffset;
                 int originalEndOffset = chunkEndCharOffset - 1; // Span.getEnd() is exclusive
 
-                // Generate chunk ID
-                String chunkId;
-                if (config != null) {
-                    String shortDocId = extractShortDocumentId(documentId);
-                    chunkId = String.format("%s-%s-%04d", config.configId(), shortDocId, chunkIndex++);
-                } else {
-                    chunkId = String.format(options.chunkIdTemplate(), streamId, documentId, chunkIndex++);
-                }
+                // Generate chunk ID (node/step = options.chunkConfigId())
+                String shortDocId = extractShortDocumentId(documentId);
+                String chunkId = String.format("%s-%s-%04d", options.chunkConfigId(), shortDocId, chunkIndex++);
                 
                 chunks.add(new Chunk(chunkId, finalChunkText, originalStartOffset, originalEndOffset));
             }

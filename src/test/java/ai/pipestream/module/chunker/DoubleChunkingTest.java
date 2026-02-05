@@ -162,17 +162,13 @@ public class DoubleChunkingTest {
             .setCurrentHopNumber(1)
             .build();
 
-        // Build a ChunkerConfig-compatible Struct instead of legacy ChunkerOptions format
-        // Fields expected by ChunkerConfig: sourceField, chunkSize, chunkOverlap, preserveUrls, cleanText, config_id
+        // Build a ChunkerConfig-compatible Struct (node_id is the identifier; no config_id in config)
         Struct.Builder cfg = Struct.newBuilder()
             .putFields("sourceField", Value.newBuilder().setStringValue(config.sourceField()).build())
             .putFields("chunkSize", Value.newBuilder().setNumberValue(config.chunkSize()).build())
             .putFields("chunkOverlap", Value.newBuilder().setNumberValue(config.chunkOverlap()).build())
             .putFields("preserveUrls", Value.newBuilder().setBoolValue(config.preserveUrls()).build())
-            // Ensure predictable behavior in tests
-            .putFields("cleanText", Value.newBuilder().setBoolValue(true).build())
-            // Force explicit configuration IDs so the two passes differ deterministically
-            .putFields("config_id", Value.newBuilder().setStringValue(config.chunkConfigId()).build());
+            .putFields("cleanText", Value.newBuilder().setBoolValue(true).build());
 
         ProcessConfiguration processConfig = ProcessConfiguration.newBuilder()
             .setJsonConfig(cfg.build())
