@@ -2,10 +2,10 @@ package ai.pipestream.module.chunker.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.networknt.schema.JsonSchema;
-import com.networknt.schema.JsonSchemaFactory;
-import com.networknt.schema.SpecVersion;
-import com.networknt.schema.ValidationMessage;
+import com.networknt.schema.Schema;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SpecificationVersion;
+import com.networknt.schema.Error;
 import ai.pipestream.module.chunker.schema.SchemaExtractorService;
 import io.quarkus.arc.Arc;
 import io.quarkus.smallrye.openapi.runtime.OpenApiConstants;
@@ -21,7 +21,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -37,6 +39,9 @@ public class OpenApiSchemaExtractionTest {
 
     @Inject
     SchemaExtractorService schemaExtractorService;
+
+    // Use Jackson 3 for json-schema-validator 3.0.0
+    private static final tools.jackson.databind.ObjectMapper jackson3Mapper = new tools.jackson.databind.ObjectMapper();
 
     /**
      * TEST 1: Extract ChunkerConfig schema from the dynamically generated OpenAPI document
@@ -166,14 +171,15 @@ public class OpenApiSchemaExtractionTest {
                 .orElseThrow(() -> new AssertionError("Failed to extract ChunkerConfig schema for validation"));
 
         try {
-            // Use the same JSON Schema v7 validation that ConsulModuleRegistryService uses
-            JsonSchemaFactory factory = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V7);
-            ObjectMapper objectMapper = new ObjectMapper();
-            JsonNode schemaNode = objectMapper.readTree(chunkerConfigSchema);
+            // Use SchemaRegistry from 3.0.0
+            SchemaRegistry registry = SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_7);
+            
+            // Parse schema using Jackson 3
+            tools.jackson.databind.JsonNode schemaNode = jackson3Mapper.readTree(chunkerConfigSchema);
 
-            // Create a JsonSchema validator from the extracted schema
-            JsonSchema validator = factory.getSchema(schemaNode);
-            assertThat("JsonSchema validator should be created successfully", validator, is(notNullValue()));
+            // Create a Schema validator from the extracted schema
+            Schema validator = registry.getSchema(schemaNode);
+            assertThat("Schema validator should be created successfully", validator, is(notNullValue()));
 
             // Test the schema against a valid ChunkerConfig example
             String validExample = """
@@ -187,8 +193,9 @@ public class OpenApiSchemaExtractionTest {
                 }
                 """;
 
-            JsonNode exampleNode = objectMapper.readTree(validExample);
-            Set<ValidationMessage> validationErrors = validator.validate(exampleNode);
+            // Parse example using Jackson 3
+            tools.jackson.databind.JsonNode exampleNode = jackson3Mapper.readTree(validExample);
+            List<Error> validationErrors = validator.validate(exampleNode);
 
             LOG.infof("Validation errors for valid example: %s", validationErrors);
             assertThat("Valid example should pass validation", validationErrors, is(empty()));
@@ -200,8 +207,8 @@ public class OpenApiSchemaExtractionTest {
                 }
                 """;
 
-            JsonNode invalidNode = objectMapper.readTree(invalidExample);
-            Set<ValidationMessage> invalidErrors = validator.validate(invalidNode);
+            tools.jackson.databind.JsonNode invalidNode = jackson3Mapper.readTree(invalidExample);
+            List<Error> invalidErrors = validator.validate(invalidNode);
 
             LOG.infof("Validation errors for invalid example: %s", invalidErrors);
             // We expect validation errors for the invalid example (missing required 'algorithm' and 'chunkSize')
@@ -216,8 +223,8 @@ public class OpenApiSchemaExtractionTest {
                 }
                 """;
 
-            JsonNode invalidRangeNode = objectMapper.readTree(invalidRangeExample);
-            Set<ValidationMessage> rangeErrors = validator.validate(invalidRangeNode);
+            tools.jackson.databind.JsonNode invalidRangeNode = jackson3Mapper.readTree(invalidRangeExample);
+            List<Error> rangeErrors = validator.validate(invalidRangeNode);
 
             LOG.infof("Validation errors for out-of-range example: %s", rangeErrors);
             // We expect validation errors for chunkSize < 50

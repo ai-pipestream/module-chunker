@@ -186,7 +186,7 @@ public abstract class ChunkerServiceTestBase {
         // With a small chunk size (30 tokens), we should get multiple chunks from the long text (58+ tokens)
         var result = response.getOutputDoc().getSearchMetadata().getSemanticResults(0);
         assertThat("Small chunk size should create multiple chunks", result.getChunksCount(), is(greaterThan(1)));
-        assertThat("Should use custom chunk configuration ID", result.getChunkConfigId(), is(equalTo("test_small_chunks")));
+        assertThat("Should use pipeStepName as chunk configuration ID", result.getChunkConfigId(), is(equalTo("chunker-step")));
 
         // Verify chunk properties
         for (int i = 0; i < result.getChunksCount(); i++) {
