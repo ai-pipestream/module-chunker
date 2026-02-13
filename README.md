@@ -27,3 +27,8 @@ Key configuration properties (via `application.properties` or environment variab
 | `module.name` | Module name for registration | `chunker` |
 | `quarkus.http.port` | HTTP port | `39002` |
 | `mp.openapi.version` | OpenAPI spec version | `3.1.0` |
+
+## Requirements
+
+- JDK 21+
+- Gradle 9.x
