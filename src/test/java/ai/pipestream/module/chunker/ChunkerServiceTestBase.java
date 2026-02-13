@@ -142,7 +142,9 @@ public abstract class ChunkerServiceTestBase {
                         .setBody("This is a longer test document body that should be chunked into multiple pieces " +
                                 "based on the custom configuration settings. We want to ensure that the chunker " +
                                 "respects the custom chunk size and overlap settings. This text should be long " +
-                                "enough to be split into at least two chunks with the smaller chunk size setting.")
+                                "enough to be split into at least two chunks with the smaller chunk size setting. " +
+                                "Adding even more text here to ensure that we exceed the minimum valid chunk size " +
+                                "of fifty tokens, so that the splitting logic is actually exercised during this test.")
                         .setTitle("Custom Config Test")
                         .build())
                 .build();
@@ -154,12 +156,12 @@ public abstract class ChunkerServiceTestBase {
                 .setStreamId(UUID.randomUUID().toString())
                 .build();
 
-        // Create configuration with smaller chunk size (30 tokens > 20 overlap, but < 58 total tokens)
+        // Create configuration with small but valid chunk size (50 tokens)
         ProcessConfiguration config = ProcessConfiguration.newBuilder()
                 .setJsonConfig(Struct.newBuilder()
                         .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
                         .putFields("sourceField", Value.newBuilder().setStringValue("body").build())
-                        .putFields("chunkSize", Value.newBuilder().setNumberValue(30).build())
+                        .putFields("chunkSize", Value.newBuilder().setNumberValue(50).build())
                         .putFields("chunkOverlap", Value.newBuilder().setNumberValue(10).build())
                         .putFields("config_id", Value.newBuilder().setStringValue("test_small_chunks").build())
                         .build())
@@ -180,11 +182,14 @@ public abstract class ChunkerServiceTestBase {
 
         assertThat("Custom configuration should be processed successfully", response.getSuccess(), is(true));
         assertThat("Should produce chunked output document", response.hasOutputDoc(), is(true));
-        assertThat("Should create semantic results with custom config", response.getOutputDoc().getSearchMetadata().getSemanticResultsCount(), is(greaterThan(0)));
+        
+        var searchMetadata = response.getOutputDoc().getSearchMetadata();
+        assertThat("Should create semantic results with custom config", searchMetadata.getSemanticResultsCount(), is(greaterThan(0)));
         assertThat("Should preserve original document metadata", response.getOutputDoc().getDocId(), is(equalTo(testDoc.getDocId())));
 
-        // With a small chunk size (30 tokens), we should get multiple chunks from the long text (58+ tokens)
-        var result = response.getOutputDoc().getSearchMetadata().getSemanticResults(0);
+        // With a small chunk size (50 tokens), we should get multiple chunks from the long text
+        var result = searchMetadata.getSemanticResults(0);
+        
         assertThat("Small chunk size should create multiple chunks", result.getChunksCount(), is(greaterThan(1)));
         assertThat("Should use pipeStepName as chunk configuration ID", result.getChunkConfigId(), is(equalTo("chunker-step")));
 
@@ -193,7 +198,7 @@ public abstract class ChunkerServiceTestBase {
             var chunk = result.getChunks(i);
             assertThat(String.format("Chunk %d should have content", i), chunk.getEmbeddingInfo().getTextContent(), is(not(emptyString())));
             // For token chunking, chunks will be much shorter than character chunks
-            assertThat(String.format("Chunk %d should be reasonable token-based size", i), chunk.getEmbeddingInfo().getTextContent().length(), is(lessThanOrEqualTo(200))); // Allow flexibility for token reconstruction
+            assertThat(String.format("Chunk %d should be reasonable token-based size", i), chunk.getEmbeddingInfo().getTextContent().length(), is(lessThanOrEqualTo(500))); // Allow flexibility for token reconstruction
         }
     }
 
