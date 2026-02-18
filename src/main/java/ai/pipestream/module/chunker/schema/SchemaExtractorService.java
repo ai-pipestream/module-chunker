@@ -12,6 +12,7 @@ import org.jboss.logging.Logger;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Service for extracting OpenAPI schema components from the dynamically generated OpenAPI document.
@@ -21,6 +22,9 @@ import java.util.Optional;
 public class SchemaExtractorService {
 
     private static final Logger LOG = Logger.getLogger(SchemaExtractorService.class);
+
+    /** OpenAPI-specific format values that are not part of JSON Schema v7 and cause AJV compilation errors. */
+    private static final Set<String> OPENAPI_ONLY_FORMATS = Set.of("int32", "int64", "float", "double");
 
     private final Instance<OpenApiDocumentService> openApiDocumentService;
 
@@ -204,6 +208,14 @@ public class SchemaExtractorService {
         return extractSchemaResolvedForJsonForms("ChunkerConfig");
     }
 
+    private boolean shouldSkipKey(String key, JsonValue value) {
+        if (key.startsWith("x-")) return true;
+        if ("format".equals(key) && value.getValueType() == JsonValue.ValueType.STRING) {
+            return OPENAPI_ONLY_FORMATS.contains(((JsonString) value).getString());
+        }
+        return false;
+    }
+
     private JsonObject resolveRefsAndClean(JsonObject node, JsonObject componentsSchemas) {
         if (node.containsKey("$ref")) {
             String ref = node.getString("$ref", null);
@@ -214,7 +226,7 @@ public class SchemaExtractorService {
             resolvedBase.forEach(builder::add);
 
             for (String key : node.keySet()) {
-                if ("$ref".equals(key) || key.startsWith("x-")) continue;
+                if ("$ref".equals(key) || shouldSkipKey(key, node.get(key))) continue;
                 var value = node.get(key);
                 if (value instanceof JsonObject) {
                     builder.add(key, resolveRefsAndClean((JsonObject) value, componentsSchemas));
@@ -229,7 +241,7 @@ public class SchemaExtractorService {
 
         var builder = Json.createObjectBuilder();
         for (String key : node.keySet()) {
-            if (key.startsWith("x-")) continue;
+            if (shouldSkipKey(key, node.get(key))) continue;
             var value = node.get(key);
             if (value instanceof JsonObject) {
                 builder.add(key, resolveRefsAndClean((JsonObject) value, componentsSchemas));
