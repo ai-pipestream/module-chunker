@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Chunker Module Startup Script
-# Port: 39002 (Text Chunker Module)
+# Port: 19002 (Text Chunker Module)
 # This script helps start the chunker module in development mode
 # with proper environment variable detection and instance management.
 
@@ -66,7 +66,7 @@ fi
 
 # Service configuration
 SERVICE_NAME="Chunker Module"
-SERVICE_PORT="39002"
+SERVICE_PORT="19002"
 DESCRIPTION="Text chunking module for breaking documents into overlapping chunks for semantic processing"
 
 # Check dependencies

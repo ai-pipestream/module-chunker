@@ -58,7 +58,7 @@ Passed as JSON via gRPC or REST:
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `quarkus.http.port` | `39002` | HTTP/gRPC port |
+| `quarkus.http.port` | `19002` | HTTP/gRPC port |
 | `quarkus.http.root-path` | `/modules/chunker` | Context path |
 | `module.name` | `chunker` | Module name for platform registration |
 | `pipestream.registration.enabled` | `true` | Auto-register with platform |
@@ -93,7 +93,7 @@ Each chunk is enriched with metadata including:
 docker build -f src/main/docker/Dockerfile.jvm -t module-chunker .
 
 # Run
-docker run --rm -p 39002:39002 \
+docker run --rm -p 19002:19002 \
   -e CONSUL_HOST=consul \
   -e CONSUL_PORT=8500 \
   module-chunker

@@ -180,6 +180,7 @@ publishing {
 
     repositories {
         mavenLocal()
+        mavenLocal()
 
         if (System.getenv("GITHUB_ACTOR") != null) {
             maven {
