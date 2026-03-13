@@ -37,6 +37,7 @@ pipestreamProtos {
     modules {
         register("common")
         register("pipeline-module")
+        register("semantic-indexing")
     }
 }
 
