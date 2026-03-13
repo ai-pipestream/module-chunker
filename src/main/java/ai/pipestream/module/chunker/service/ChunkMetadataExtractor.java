@@ -1,5 +1,7 @@
 package ai.pipestream.module.chunker.service;
 
+import ai.pipestream.data.v1.ChunkAnalytics;
+import ai.pipestream.data.v1.DocumentAnalytics;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Value;
 import jakarta.inject.Inject;
@@ -113,6 +115,121 @@ public class ChunkMetadataExtractor {
         metadataMap.put("potential_heading_score", Value.newBuilder().setNumberValue(calculatePotentialHeadingScore(chunkText, tokens, sentenceCount)).build());
 
         return metadataMap;
+    }
+
+    /**
+     * Extracts typed ChunkAnalytics proto for a chunk.
+     */
+    public ChunkAnalytics extractChunkAnalytics(String chunkText, int chunkNumber, int totalChunks, boolean containsUrlPlaceholder) {
+        ChunkAnalytics.Builder builder = ChunkAnalytics.newBuilder();
+        if (StringUtils.isBlank(chunkText)) {
+            return builder.build();
+        }
+
+        int characterCount = chunkText.length();
+        String[] sentences = sentenceDetector.sentDetect(chunkText);
+        String[] tokens = tokenizer.tokenize(chunkText);
+        int wordCount = tokens.length;
+        int sentenceCount = sentences.length;
+
+        builder.setWordCount(wordCount)
+                .setCharacterCount(characterCount)
+                .setSentenceCount(sentenceCount);
+
+        if (wordCount > 0) {
+            double avgWordLen = (double) Arrays.stream(tokens).mapToInt(String::length).sum() / wordCount;
+            builder.setAverageWordLength((float) avgWordLen);
+            Set<String> unique = new HashSet<>(Arrays.asList(tokens));
+            builder.setVocabularyDensity((float) unique.size() / wordCount);
+        }
+        if (sentenceCount > 0) {
+            builder.setAverageSentenceLength((float) wordCount / sentenceCount);
+        }
+
+        long whitespace = chunkText.chars().filter(Character::isWhitespace).count();
+        long alphanumeric = chunkText.chars().filter(Character::isLetterOrDigit).count();
+        long digits = chunkText.chars().filter(Character::isDigit).count();
+        long uppercase = chunkText.chars().filter(Character::isUpperCase).count();
+
+        builder.setWhitespacePercentage(characterCount > 0 ? (float) whitespace / characterCount : 0)
+                .setAlphanumericPercentage(characterCount > 0 ? (float) alphanumeric / characterCount : 0)
+                .setDigitPercentage(characterCount > 0 ? (float) digits / characterCount : 0)
+                .setUppercasePercentage(characterCount > 0 ? (float) uppercase / characterCount : 0);
+
+        Map<Character, Integer> puncCounts = new HashMap<>();
+        for (char c : chunkText.toCharArray()) {
+            if (StringUtils.isAsciiPrintable(String.valueOf(c)) && !Character.isLetterOrDigit(c) && !Character.isWhitespace(c)) {
+                puncCounts.merge(c, 1, Integer::sum);
+            }
+        }
+        for (Map.Entry<Character, Integer> entry : puncCounts.entrySet()) {
+            builder.putPunctuationCounts(String.valueOf(entry.getKey()), entry.getValue());
+        }
+
+        // Positional fields
+        builder.setIsFirstChunk(chunkNumber == 0)
+                .setIsLastChunk(chunkNumber == totalChunks - 1)
+                .setContainsUrlPlaceholder(containsUrlPlaceholder)
+                .setListItemIndicator(LIST_ITEM_PATTERN.matcher(chunkText).matches())
+                .setPotentialHeadingScore((float) calculatePotentialHeadingScore(chunkText, tokens, sentenceCount));
+
+        if (totalChunks > 1) {
+            builder.setRelativePosition((float) chunkNumber / (totalChunks - 1));
+        }
+
+        return builder.build();
+    }
+
+    /**
+     * Extracts typed DocumentAnalytics proto for a full source text.
+     */
+    public DocumentAnalytics extractDocumentAnalytics(String fullText) {
+        DocumentAnalytics.Builder builder = DocumentAnalytics.newBuilder();
+        if (StringUtils.isBlank(fullText)) {
+            return builder.build();
+        }
+
+        int characterCount = fullText.length();
+        String[] sentences = sentenceDetector.sentDetect(fullText);
+        String[] tokens = tokenizer.tokenize(fullText);
+        int wordCount = tokens.length;
+        int sentenceCount = sentences.length;
+
+        builder.setWordCount(wordCount)
+                .setCharacterCount(characterCount)
+                .setSentenceCount(sentenceCount);
+
+        if (wordCount > 0) {
+            double avgWordLen = (double) Arrays.stream(tokens).mapToInt(String::length).sum() / wordCount;
+            builder.setAverageWordLength((float) avgWordLen);
+            Set<String> unique = new HashSet<>(Arrays.asList(tokens));
+            builder.setVocabularyDensity((float) unique.size() / wordCount);
+        }
+        if (sentenceCount > 0) {
+            builder.setAverageSentenceLength((float) wordCount / sentenceCount);
+        }
+
+        long whitespace = fullText.chars().filter(Character::isWhitespace).count();
+        long alphanumeric = fullText.chars().filter(Character::isLetterOrDigit).count();
+        long digits = fullText.chars().filter(Character::isDigit).count();
+        long uppercase = fullText.chars().filter(Character::isUpperCase).count();
+
+        builder.setWhitespacePercentage(characterCount > 0 ? (float) whitespace / characterCount : 0)
+                .setAlphanumericPercentage(characterCount > 0 ? (float) alphanumeric / characterCount : 0)
+                .setDigitPercentage(characterCount > 0 ? (float) digits / characterCount : 0)
+                .setUppercasePercentage(characterCount > 0 ? (float) uppercase / characterCount : 0);
+
+        Map<Character, Integer> puncCounts = new HashMap<>();
+        for (char c : fullText.toCharArray()) {
+            if (StringUtils.isAsciiPrintable(String.valueOf(c)) && !Character.isLetterOrDigit(c) && !Character.isWhitespace(c)) {
+                puncCounts.merge(c, 1, Integer::sum);
+            }
+        }
+        for (Map.Entry<Character, Integer> entry : puncCounts.entrySet()) {
+            builder.putPunctuationCounts(String.valueOf(entry.getKey()), entry.getValue());
+        }
+
+        return builder.build();
     }
 
     /**

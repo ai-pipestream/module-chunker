@@ -1,5 +1,7 @@
 package ai.pipestream.module.chunker;
 
+import ai.pipestream.data.v1.ChunkAnalytics;
+import ai.pipestream.data.v1.DocumentAnalytics;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.SearchMetadata;
 import ai.pipestream.module.chunker.config.ChunkerConfig;
@@ -98,13 +100,18 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
 
                 LOG.infof("StreamChunks produced %d chunks for requestId=%s", chunks.size(), requestId);
 
+                // Compute document-level analytics once for the full source text
+                DocumentAnalytics docAnalytics = metadataExtractor.extractDocumentAnalytics(textContent);
+
                 // Stream each chunk
                 for (int i = 0; i < chunks.size(); i++) {
                     Chunk chunk = chunks.get(i);
                     boolean isLast = (i == chunks.size() - 1);
 
-                    // Extract metadata
+                    // Extract metadata (legacy map) and typed analytics
                     Map<String, com.google.protobuf.Value> chunkMetadata = metadataExtractor.extractAllMetadata(
+                            chunk.text(), i, chunks.size(), false);
+                    ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
                             chunk.text(), i, chunks.size(), false);
 
                     StreamChunksResponse.Builder responseBuilder = StreamChunksResponse.newBuilder()
@@ -118,7 +125,14 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                             .setChunkConfigId(chunkConfigId)
                             .setSourceFieldName(effectiveSourceField)
                             .setIsLast(isLast)
-                            .putAllMetadata(chunkMetadata);
+                            .putAllMetadata(chunkMetadata)
+                            .setChunkAnalytics(chunkAnalytics);
+
+                    // Populate document analytics and total_chunks on the last chunk only
+                    if (isLast) {
+                        responseBuilder.setDocumentAnalytics(docAnalytics)
+                                .setTotalChunks(chunks.size());
+                    }
 
                     emitter.emit(responseBuilder.build());
                 }
