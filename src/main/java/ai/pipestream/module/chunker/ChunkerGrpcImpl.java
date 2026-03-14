@@ -60,6 +60,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
         String logPrefix = isTest ? "[TEST] " : "";
 
         return Uni.createFrom().item(() -> {
+            long startTime = System.currentTimeMillis();
             try {
                 ProcessDataResponse.Builder responseBuilder = ProcessDataResponse.newBuilder();
 
@@ -67,7 +68,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     LOG.info(logPrefix + "No document provided in request");
                     return ProcessDataResponse.newBuilder()
                             .setSuccess(true)
-                            .addProcessorLogs("Chunker service: no document to process. Chunker service successfully processed request.")
+                            .addProcessorLogs("Chunker service: no document to process")
                             .build();
                 }
 
@@ -107,6 +108,19 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 if (chunkerConfig.sourceField() == null || chunkerConfig.sourceField().isEmpty()) {
                     return createErrorResponse("Missing 'sourceField' in ChunkerConfig", null);
                 }
+
+                responseBuilder.addProcessorLogs(String.format(
+                        "Chunking strategy: %s with chunk size %s and overlap %s",
+                        chunkerConfig.algorithm().getValue(),
+                        chunkerConfig.chunkSize() != null ? chunkerConfig.chunkSize() : "default",
+                        chunkerConfig.chunkOverlap() != null ? chunkerConfig.chunkOverlap() : "default"));
+
+                // Log source field text length for audit
+                String sourceText = extractSourceText(inputDoc, chunkerConfig.sourceField());
+                int charCount = sourceText != null ? sourceText.length() : 0;
+                responseBuilder.addProcessorLogs(String.format(
+                        "Chunking document %s: source field '%s', text length: %d characters",
+                        inputDoc.getDocId(), chunkerConfig.sourceField(), charCount));
 
                 // Create chunks using ChunkerConfig for better ID generation
                 ChunkingResult chunkingResult = overlapChunker.createChunks(inputDoc, chunkerConfig, streamId, pipeStepName);
@@ -174,11 +188,20 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                         String.format("%sSuccessfully created and added metadata to %d chunks from source field '%s' into result set '%s' using %s algorithm. Chunker service successfully processed document.",
                             logPrefix, chunkRecords.size(), chunkerConfig.sourceField(), resultSetName, chunkerConfig.algorithm().getValue());
 
+                    int avgChunkSize = chunkRecords.stream()
+                            .mapToInt(c -> c.text().length()).sum() / chunkRecords.size();
+                    responseBuilder.addProcessorLogs(String.format(
+                            "Produced %d chunks from %d characters (avg chunk size: %d chars)",
+                            chunkRecords.size(), charCount, avgChunkSize));
                     responseBuilder.addProcessorLogs(successMessage);
                 } else {
-                    responseBuilder.addProcessorLogs(String.format("%sNo content in '%s' to chunk for document ID: %s",
-                            logPrefix, chunkerConfig.sourceField(), inputDoc.getDocId()));
+                    responseBuilder.addProcessorLogs(String.format(
+                            "No text found in source field '%s' — no chunks produced for document %s",
+                            chunkerConfig.sourceField(), inputDoc.getDocId()));
                 }
+
+                long duration = System.currentTimeMillis() - startTime;
+                responseBuilder.addProcessorLogs(String.format("Chunking completed in %dms", duration));
 
                 responseBuilder.setSuccess(true);
                 PipeDoc outputDoc = outputDocBuilder.build();
@@ -248,6 +271,16 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             responseBuilder.setHealthCheckMessage("Chunker module is ready");
             return Uni.createFrom().item(responseBuilder.build());
         }
+    }
+
+    private String extractSourceText(PipeDoc doc, String sourceField) {
+        if (doc == null || !doc.hasSearchMetadata()) return null;
+        return switch (sourceField.toLowerCase()) {
+            case "body" -> doc.getSearchMetadata().hasBody() ? doc.getSearchMetadata().getBody() : null;
+            case "title" -> doc.getSearchMetadata().hasTitle() ? doc.getSearchMetadata().getTitle() : null;
+            case "doc_id" -> doc.getDocId();
+            default -> null;
+        };
     }
 
     private ProcessDataResponse createErrorResponse(String errorMessage, Exception e) {
