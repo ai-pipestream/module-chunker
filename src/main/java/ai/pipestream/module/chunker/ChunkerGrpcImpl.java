@@ -6,6 +6,10 @@ import com.google.protobuf.util.JsonFormat;
 
 import ai.pipestream.module.chunker.schema.SchemaExtractorService;
 import ai.pipestream.data.v1.ChunkEmbedding;
+import ai.pipestream.data.v1.LogEntry;
+import ai.pipestream.data.v1.LogEntrySource;
+import ai.pipestream.data.v1.LogLevel;
+import ai.pipestream.data.v1.ModuleLogOrigin;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.SemanticChunk;
 import ai.pipestream.data.v1.SemanticProcessingResult;
@@ -68,7 +72,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     LOG.info(logPrefix + "No document provided in request");
                     return ProcessDataResponse.newBuilder()
                             .setSuccess(true)
-                            .addProcessorLogs("Chunker service: no document to process")
+                            .addLogEntries(moduleLog("Chunker service: no document to process", LogLevel.LOG_LEVEL_INFO))
                             .build();
                 }
 
@@ -109,18 +113,18 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     return createErrorResponse("Missing 'sourceField' in ChunkerConfig", null);
                 }
 
-                responseBuilder.addProcessorLogs(String.format(
+                responseBuilder.addLogEntries(moduleLog(String.format(
                         "Chunking strategy: %s with chunk size %s and overlap %s",
                         chunkerConfig.algorithm().getValue(),
                         chunkerConfig.chunkSize() != null ? chunkerConfig.chunkSize() : "default",
-                        chunkerConfig.chunkOverlap() != null ? chunkerConfig.chunkOverlap() : "default"));
+                        chunkerConfig.chunkOverlap() != null ? chunkerConfig.chunkOverlap() : "default"), LogLevel.LOG_LEVEL_INFO));
 
                 // Log source field text length for audit
                 String sourceText = extractSourceText(inputDoc, chunkerConfig.sourceField());
                 int charCount = sourceText != null ? sourceText.length() : 0;
-                responseBuilder.addProcessorLogs(String.format(
+                responseBuilder.addLogEntries(moduleLog(String.format(
                         "Chunking document %s: source field '%s', text length: %d characters",
-                        inputDoc.getDocId(), chunkerConfig.sourceField(), charCount));
+                        inputDoc.getDocId(), chunkerConfig.sourceField(), charCount), LogLevel.LOG_LEVEL_INFO));
 
                 // Create chunks using ChunkerConfig for better ID generation
                 ChunkingResult chunkingResult = overlapChunker.createChunks(inputDoc, chunkerConfig, streamId, pipeStepName);
@@ -190,18 +194,18 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
                     int avgChunkSize = chunkRecords.stream()
                             .mapToInt(c -> c.text().length()).sum() / chunkRecords.size();
-                    responseBuilder.addProcessorLogs(String.format(
+                    responseBuilder.addLogEntries(moduleLog(String.format(
                             "Produced %d chunks from %d characters (avg chunk size: %d chars)",
-                            chunkRecords.size(), charCount, avgChunkSize));
-                    responseBuilder.addProcessorLogs(successMessage);
+                            chunkRecords.size(), charCount, avgChunkSize), LogLevel.LOG_LEVEL_INFO));
+                    responseBuilder.addLogEntries(moduleLog(successMessage, LogLevel.LOG_LEVEL_INFO));
                 } else {
-                    responseBuilder.addProcessorLogs(String.format(
+                    responseBuilder.addLogEntries(moduleLog(String.format(
                             "No text found in source field '%s' — no chunks produced for document %s",
-                            chunkerConfig.sourceField(), inputDoc.getDocId()));
+                            chunkerConfig.sourceField(), inputDoc.getDocId()), LogLevel.LOG_LEVEL_INFO));
                 }
 
                 long duration = System.currentTimeMillis() - startTime;
-                responseBuilder.addProcessorLogs(String.format("Chunking completed in %dms", duration));
+                responseBuilder.addLogEntries(moduleLog(String.format("Chunking completed in %dms", duration), LogLevel.LOG_LEVEL_INFO));
 
                 responseBuilder.setSuccess(true);
                 PipeDoc outputDoc = outputDocBuilder.build();
@@ -254,7 +258,10 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                         responseBuilder
                             .setHealthCheckPassed(false)
                             .setHealthCheckMessage("Chunker module health check failed: " +
-                                String.join("; ", processResponse.getProcessorLogsList()));
+                                processResponse.getLogEntriesList().stream()
+                                    .map(LogEntry::getMessage)
+                                    .reduce((a, b) -> a + "; " + b)
+                                    .orElse("unknown error"));
                     }
                     return responseBuilder.build();
                 })
@@ -283,10 +290,20 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
         };
     }
 
+    private static LogEntry moduleLog(String message, LogLevel level) {
+        return LogEntry.newBuilder()
+            .setSource(LogEntrySource.LOG_ENTRY_SOURCE_MODULE)
+            .setLevel(level)
+            .setMessage(message)
+            .setTimestampEpochMs(System.currentTimeMillis())
+            .setModule(ModuleLogOrigin.newBuilder().setModuleName("chunker").build())
+            .build();
+    }
+
     private ProcessDataResponse createErrorResponse(String errorMessage, Exception e) {
         ProcessDataResponse.Builder responseBuilder = ProcessDataResponse.newBuilder();
         responseBuilder.setSuccess(false);
-        responseBuilder.addProcessorLogs(errorMessage);
+        responseBuilder.addLogEntries(moduleLog(errorMessage, LogLevel.LOG_LEVEL_ERROR));
 
         Struct.Builder errorDetailsBuilder = Struct.newBuilder();
         errorDetailsBuilder.putFields("error_message", com.google.protobuf.Value.newBuilder().setStringValue(errorMessage).build());
