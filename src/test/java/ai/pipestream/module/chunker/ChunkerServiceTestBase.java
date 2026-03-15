@@ -2,6 +2,7 @@ package ai.pipestream.module.chunker;
 
 import com.google.protobuf.Struct;
 import com.google.protobuf.Value;
+import ai.pipestream.data.v1.LogEntry;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
@@ -68,8 +69,8 @@ public abstract class ChunkerServiceTestBase {
         assertThat("Response should be successful", response.getSuccess(), is(true));
         assertThat("Response should have output document", response.hasOutputDoc(), is(true));
         assertThat("Output document ID should match input", response.getOutputDoc().getDocId(), is(testDoc.getDocId()));
-        assertThat("Should have processor logs", response.getProcessorLogsList(), is(not(empty())));
-        assertThat("Should contain success message", response.getProcessorLogsList(), hasItem(containsString("successfully processed")));
+        assertThat("Should have processor logs", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), is(not(empty())));
+        assertThat("Should contain success message", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), hasItem(containsString("successfully processed")));
     }
 
     @Test
@@ -91,8 +92,8 @@ public abstract class ChunkerServiceTestBase {
 
         assertThat("Chunker should handle missing document gracefully", response.getSuccess(), is(true));
         assertThat("No document means no output should be produced", response.hasOutputDoc(), is(false));
-        assertThat("Should log processing attempt for missing document", response.getProcessorLogsList(), is(not(empty())));
-        assertThat("Should acknowledge no document to process", response.getProcessorLogsList(), hasItem(containsString("no document to process")));
+        assertThat("Should log processing attempt for missing document", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), is(not(empty())));
+        assertThat("Should acknowledge no document to process", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), hasItem(containsString("no document to process")));
     }
 
     @Test
@@ -129,8 +130,8 @@ public abstract class ChunkerServiceTestBase {
         assertThat("Chunker should handle empty content without failing", response.getSuccess(), is(true));
         assertThat("Empty document should still produce output structure", response.hasOutputDoc(), is(true));
         assertThat("Document identity should be preserved through empty processing", response.getOutputDoc().getDocId(), is(testDoc.getDocId()));
-        assertThat("Should log empty content handling", response.getProcessorLogsList(), is(not(empty())));
-        assertThat("Should explicitly acknowledge empty content scenario", response.getProcessorLogsList(), hasItem(containsString("No text found")));
+        assertThat("Should log empty content handling", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), is(not(empty())));
+        assertThat("Should explicitly acknowledge empty content scenario", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), hasItem(containsString("No text found")));
     }
 
     @Test
@@ -267,7 +268,7 @@ public abstract class ChunkerServiceTestBase {
 
         assertThat("At least one chunk should contain complete URLs", foundCompleteUrl, is(true));
         assertThat("Should log successful URL-aware chunking",
-            response.getProcessorLogsList(), hasItem(containsString("Successfully created")));
+            response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), hasItem(containsString("Successfully created")));
     }
 
     @Test
@@ -280,9 +281,9 @@ public abstract class ChunkerServiceTestBase {
 
         // Null request handling should be robust and informative
         assertThat("Chunker should gracefully handle null input without crashing", response.getSuccess(), is(true));
-        assertThat("Should provide diagnostic information for null request", response.getProcessorLogsList(), is(not(empty())));
+        assertThat("Should provide diagnostic information for null request", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), is(not(empty())));
         assertThat("Should log at least one meaningful message about null handling",
-            response.getProcessorLogsList().size(), is(greaterThan(0)));
+            response.getLogEntriesList().stream().map(LogEntry::getMessage).toList().size(), is(greaterThan(0)));
         assertThat("Should not attempt to process null as valid document", response.hasOutputDoc(), is(false));
     }
 
