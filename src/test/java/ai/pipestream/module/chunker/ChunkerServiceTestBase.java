@@ -92,7 +92,7 @@ public abstract class ChunkerServiceTestBase {
         assertThat("Chunker should handle missing document gracefully", response.getSuccess(), is(true));
         assertThat("No document means no output should be produced", response.hasOutputDoc(), is(false));
         assertThat("Should log processing attempt for missing document", response.getProcessorLogsList(), is(not(empty())));
-        assertThat("Should acknowledge successful handling of empty request", response.getProcessorLogsList(), hasItem(containsString("successfully processed")));
+        assertThat("Should acknowledge no document to process", response.getProcessorLogsList(), hasItem(containsString("no document to process")));
     }
 
     @Test
@@ -130,7 +130,7 @@ public abstract class ChunkerServiceTestBase {
         assertThat("Empty document should still produce output structure", response.hasOutputDoc(), is(true));
         assertThat("Document identity should be preserved through empty processing", response.getOutputDoc().getDocId(), is(testDoc.getDocId()));
         assertThat("Should log empty content handling", response.getProcessorLogsList(), is(not(empty())));
-        assertThat("Should explicitly acknowledge empty content scenario", response.getProcessorLogsList(), hasItem(containsString("No content")));
+        assertThat("Should explicitly acknowledge empty content scenario", response.getProcessorLogsList(), hasItem(containsString("No text found")));
     }
 
     @Test
