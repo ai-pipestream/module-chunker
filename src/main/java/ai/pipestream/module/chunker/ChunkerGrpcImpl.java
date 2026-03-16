@@ -20,9 +20,11 @@ import ai.pipestream.module.chunker.model.Chunk;
 import ai.pipestream.module.chunker.model.ChunkingResult;
 import ai.pipestream.module.chunker.service.*;
 import io.quarkus.grpc.GrpcService;
+import io.quarkus.runtime.Quarkus;
 import io.smallrye.mutiny.Uni;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 import java.util.List;
@@ -52,6 +54,21 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
     @Inject
     SchemaExtractorService schemaExtractorService;
+
+    @ConfigProperty(name = "quarkus.application.version", defaultValue = "unknown")
+    String appVersion;
+
+    @ConfigProperty(name = "quarkus.profile", defaultValue = "prod")
+    String activeProfile;
+
+    @ConfigProperty(name = "pipestream.build.commit", defaultValue = "unknown")
+    String buildCommit;
+
+    @ConfigProperty(name = "pipestream.build.branch", defaultValue = "unknown")
+    String buildBranch;
+
+    @ConfigProperty(name = "pipestream.build.time", defaultValue = "unknown")
+    String buildTime;
 
     @Override
     public Uni<ProcessDataResponse> processData(ProcessDataRequest request) {
@@ -227,7 +244,8 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
         GetServiceRegistrationResponse.Builder responseBuilder = GetServiceRegistrationResponse.newBuilder()
                 .setModuleName("chunker")
-                .setVersion("1.0.0-SNAPSHOT")
+                .setVersion(appVersion)
+                .putAllMetadata(buildRegistrationMetadata())
                 .setCapabilities(Capabilities.newBuilder().addTypes(CapabilityType.CAPABILITY_TYPE_UNSPECIFIED).build());
 
         // Use SchemaExtractorService to get a JSONForms-ready ChunkerConfig schema (refs resolved)
@@ -315,5 +333,26 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
         }
         responseBuilder.setErrorDetails(errorDetailsBuilder.build());
         return responseBuilder.build();
+    }
+
+    private Map<String, String> buildRegistrationMetadata() {
+        Map<String, String> metadata = new java.util.HashMap<>();
+        metadata.put("build.version", appVersion);
+        metadata.put("build.commit", buildCommit);
+        metadata.put("build.branch", buildBranch);
+        metadata.put("build.time", buildTime);
+        metadata.put("runtime.java", System.getProperty("java.version", "unknown"));
+        metadata.put("runtime.quarkus", quarkusVersion());
+        metadata.put("runtime.profile", activeProfile);
+        metadata.put("runtime.hostname", System.getenv().getOrDefault("HOSTNAME", "unknown"));
+        return metadata;
+    }
+
+    private String quarkusVersion() {
+        Package quarkusPackage = Quarkus.class.getPackage();
+        if (quarkusPackage != null && quarkusPackage.getImplementationVersion() != null) {
+            return quarkusPackage.getImplementationVersion();
+        }
+        return "unknown";
     }
 }
