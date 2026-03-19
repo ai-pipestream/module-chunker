@@ -223,7 +223,7 @@ public class OverlapChunker {
             config.chunkOverlap(),
             null, // IDs generated using pipeStepName
             pipeStepName,
-            "%s_chunks_%s", // resultSetNameTemplate
+            "{step_name}_chunks", // resultSetNameTemplate
             "chunker", // logPrefix
             config.preserveUrls()
         );

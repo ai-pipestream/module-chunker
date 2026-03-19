@@ -70,7 +70,7 @@ public class SimpleDoubleChunkingTest {
             50,                        // chunkOverlap
             "%s_%s_chunk_%d",         // chunkIdTemplate
             "large_chunks_v1",        // chunkConfigId
-            "first_chunks_%s_%s",     // resultSetNameTemplate
+            "first_chunks_{step_name}",     // resultSetNameTemplate
             "[LARGE-CHUNK] ",         // logPrefix
             false                     // preserveUrls
         );
@@ -83,7 +83,7 @@ public class SimpleDoubleChunkingTest {
             20,                        // chunkOverlap
             "%s_%s_chunk_%d",         // chunkIdTemplate
             "small_chunks_v1",        // chunkConfigId
-            "second_chunks_%s_%s",    // resultSetNameTemplate
+            "second_chunks_{step_name}",    // resultSetNameTemplate
             "[SMALL-CHUNK] ",         // logPrefix
             false                     // preserveUrls
         );

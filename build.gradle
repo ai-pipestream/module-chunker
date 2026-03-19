@@ -78,6 +78,7 @@ dependencies {
     // Testing
     testImplementation platform("ai.pipestream:pipestream-bom:${pipestreamBomVersion}")
     testImplementation 'io.quarkus:quarkus-junit5'
+    testImplementation libs.assertj.core
     testImplementation 'io.quarkus:quarkus-junit5-mockito'
     testImplementation 'io.rest-assured:rest-assured'
     testImplementation 'com.networknt:json-schema-validator:3.0.1'

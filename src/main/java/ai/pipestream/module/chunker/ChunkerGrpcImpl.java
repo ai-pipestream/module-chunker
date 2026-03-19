@@ -142,11 +142,8 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                             .setSourceFieldName(chunkerConfig.sourceField())
                             .setChunkConfigId(pipeStepName);
 
-                    String resultSetName = String.format(
-                            "%s_chunks_%s",
-                            pipeStepName,
-                            pipeStepName
-                    ).replaceAll("[^a-zA-Z0-9_\\-]", "_");
+                    String resultSetName = ai.pipestream.module.chunker.model.ChunkerOptions.resolveResultSetName(
+                            null, pipeStepName, pipeStepName, chunkerConfig.sourceField());
                     newSemanticResultBuilder.setResultSetName(resultSetName);
 
                     int currentChunkNumber = 0;
