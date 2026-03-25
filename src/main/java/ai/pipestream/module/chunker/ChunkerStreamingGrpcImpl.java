@@ -61,9 +61,13 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                 ChunkerConfig chunkerConfig;
                 if (request.hasChunkerConfig() && request.getChunkerConfig().getFieldsCount() > 0) {
                     String jsonStr = JsonFormat.printer().print(request.getChunkerConfig());
+                    LOG.infof("Parsing chunker config JSON: %s", jsonStr);
                     chunkerConfig = objectMapper.readValue(jsonStr, ChunkerConfig.class);
+                    LOG.infof("Parsed chunker config: algorithm=%s, chunkSize=%d, chunkOverlap=%d, sourceField=%s",
+                            chunkerConfig.algorithm(), chunkerConfig.chunkSize(), chunkerConfig.chunkOverlap(), chunkerConfig.sourceField());
                 } else {
                     chunkerConfig = ChunkerConfig.createDefault();
+                    LOG.infof("Using default chunker config (no config in request)");
                 }
 
                 // Build a minimal PipeDoc to pass to OverlapChunker

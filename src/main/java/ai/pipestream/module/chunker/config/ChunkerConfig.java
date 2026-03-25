@@ -1,5 +1,6 @@
 package ai.pipestream.module.chunker.config;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import ai.pipestream.module.chunker.model.ChunkingAlgorithm;
 import ai.pipestream.module.chunker.examples.SampleDocuments;
@@ -39,32 +40,35 @@ public record ChunkerConfig(
     ChunkingAlgorithm algorithm,
 
     @JsonProperty("sourceField")
+    @JsonAlias("source_field")
     @Schema(
-        description = "Document field to extract text from for chunking", 
+        description = "Document field to extract text from for chunking",
         defaultValue = "body",
         examples = {"body", "title", "metadata.summary", "content.text"}
     )
     String sourceField,
 
     @JsonProperty("chunkSize")
+    @JsonAlias("chunk_size")
     @Schema(
-        description = "Target size for each chunk (characters for 'character' algorithm, tokens for 'token' algorithm, etc.)", 
-        minimum = "50", 
-        maximum = "10000", 
+        description = "Target size for each chunk (characters for 'character' algorithm, tokens for 'token' algorithm, sentences for 'sentence' algorithm)",
+        minimum = "1",
+        maximum = "10000",
         defaultValue = "500",
         required = true,
-        examples = {"300", "500", "1000", "1500"}
+        examples = {"300", "500", "1000", "1500", "10"}
     )
-    @NotNull @Min(50) @Max(10000)
+    @NotNull @Min(1) @Max(10000)
     Integer chunkSize,
 
     @JsonProperty("chunkOverlap")
+    @JsonAlias("chunk_overlap")
     @Schema(
-        description = "Amount of overlap between consecutive chunks (same units as chunkSize)", 
-        minimum = "0", 
-        maximum = "5000", 
+        description = "Amount of overlap between consecutive chunks (same units as chunkSize)",
+        minimum = "0",
+        maximum = "5000",
         defaultValue = "50",
-        examples = {"0", "25", "50", "100", "200"}
+        examples = {"0", "25", "50", "100", "200", "3"}
     )
     @Min(0) @Max(5000)
     Integer chunkOverlap,
@@ -144,8 +148,8 @@ public record ChunkerConfig(
      * @return null if valid, error message if invalid
      */
     public String validate() {
-        if (chunkSize != null && (chunkSize < 50 || chunkSize > 10000)) {
-            return "chunkSize must be between 50 and 10000";
+        if (chunkSize != null && (chunkSize < 1 || chunkSize > 10000)) {
+            return "chunkSize must be between 1 and 10000";
         }
         if (chunkOverlap != null && (chunkOverlap < 0 || chunkOverlap > 5000)) {
             return "chunkOverlap must be between 0 and 5000";
