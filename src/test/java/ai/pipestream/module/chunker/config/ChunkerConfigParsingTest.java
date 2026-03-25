@@ -91,8 +91,8 @@ class ChunkerConfigParsingTest {
 
     @Test
     void validate_chunkSizeTooSmall_returnsError() {
-        ChunkerConfig config = new ChunkerConfig(ChunkingAlgorithm.TOKEN, "body", 10, 5, false);
-        assertThat(config.validate()).as("chunkSize=10 should fail validation")
+        ChunkerConfig config = new ChunkerConfig(ChunkingAlgorithm.TOKEN, "body", 0, 5, false);
+        assertThat(config.validate()).as("chunkSize=0 should fail validation")
                 .isNotNull()
                 .contains("chunkSize");
     }

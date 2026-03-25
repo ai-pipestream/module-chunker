@@ -146,7 +146,7 @@ public class OpenApiSchemaExtractionTest {
             // Check for OpenAPI-style constraints on chunkSize
             JsonNode chunkSizeProp = properties.get("chunkSize");
             if (chunkSizeProp.has("minimum")) {
-                assertThat("ChunkSize should have minimum constraint", chunkSizeProp.get("minimum").asInt(), is(equalTo(50)));
+                assertThat("ChunkSize should have minimum constraint", chunkSizeProp.get("minimum").asInt(), is(equalTo(1)));
             }
             if (chunkSizeProp.has("maximum")) {
                 assertThat("ChunkSize should have maximum constraint", chunkSizeProp.get("maximum").asInt(), is(equalTo(10000)));
@@ -214,11 +214,11 @@ public class OpenApiSchemaExtractionTest {
             // We expect validation errors for the invalid example (missing required 'algorithm' and 'chunkSize')
             assertThat("Invalid example should have validation errors", invalidErrors.size(), is(greaterThan(0)));
 
-            // Test with invalid values (chunkSize out of range)
+            // Test with invalid values (chunkSize out of range — below minimum of 1)
             String invalidRangeExample = """
                 {
                     "algorithm": "token",
-                    "chunkSize": 25,
+                    "chunkSize": 0,
                     "sourceField": "body"
                 }
                 """;
@@ -227,7 +227,7 @@ public class OpenApiSchemaExtractionTest {
             List<Error> rangeErrors = validator.validate(invalidRangeNode);
 
             LOG.infof("Validation errors for out-of-range example: %s", rangeErrors);
-            // We expect validation errors for chunkSize < 50
+            // We expect validation errors for chunkSize < 1
             assertThat("Out-of-range example should have validation errors", rangeErrors.size(), is(greaterThan(0)));
 
             LOG.info("TEST 3 PASSED: Schema passes JSON Schema v7 validation and correctly validates examples");
@@ -254,7 +254,7 @@ public class OpenApiSchemaExtractionTest {
             // Verify chunkSize constraints
             JsonNode chunkSizeProp = properties.get("chunkSize");
             assertThat("ChunkSize should have minimum constraint", chunkSizeProp.has("minimum"), is(true));
-            assertThat("ChunkSize minimum should be 50", chunkSizeProp.get("minimum").asInt(), is(equalTo(50)));
+            assertThat("ChunkSize minimum should be 50", chunkSizeProp.get("minimum").asInt(), is(equalTo(1)));
             assertThat("ChunkSize should have maximum constraint", chunkSizeProp.has("maximum"), is(true));
             assertThat("ChunkSize maximum should be 10000", chunkSizeProp.get("maximum").asInt(), is(equalTo(10000)));
 
@@ -335,13 +335,13 @@ public class OpenApiSchemaExtractionTest {
             var invalidConfig1 = ai.pipestream.module.chunker.config.ChunkerConfig.create(
                 ai.pipestream.module.chunker.model.ChunkingAlgorithm.TOKEN,
                 "body",
-                25, // Invalid: below minimum of 50
-                20,
+                0, // Invalid: below minimum of 1
+                0,
                 true
             );
             String validation1 = invalidConfig1.validate();
-            assertThat("Config with chunkSize < 50 should be invalid", validation1, is(notNullValue()));
-            assertThat("Validation message should mention chunkSize range", validation1, containsString("chunkSize must be between 50 and 10000"));
+            assertThat("Config with chunkSize < 1 should be invalid", validation1, is(notNullValue()));
+            assertThat("Validation message should mention chunkSize range", validation1, containsString("chunkSize must be between 1 and 10000"));
 
             // Test invalid chunkOverlap (too large)
             var invalidConfig2 = ai.pipestream.module.chunker.config.ChunkerConfig.create(
