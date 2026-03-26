@@ -21,6 +21,10 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -118,6 +122,11 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                     ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
                             chunk.text(), i, chunks.size(), false);
 
+                    // Compute SHA-256 content hash of the chunk text
+                    String contentHash = sha256Hex(chunk.text());
+                    chunkMetadata.put("content_hash",
+                            com.google.protobuf.Value.newBuilder().setStringValue(contentHash).build());
+
                     StreamChunksResponse.Builder responseBuilder = StreamChunksResponse.newBuilder()
                             .setRequestId(requestId)
                             .setDocId(docId)
@@ -148,5 +157,19 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                 emitter.fail(e);
             }
         });
+    }
+
+    /**
+     * Computes the SHA-256 hash of the given text and returns it as a lowercase hex string.
+     */
+    private static String sha256Hex(String text) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is guaranteed to be available in every JDK
+            throw new AssertionError("SHA-256 not available", e);
+        }
     }
 }
