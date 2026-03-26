@@ -8,6 +8,7 @@ import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
 import ai.pipestream.data.module.v1.PipeStepProcessorService;
 import ai.pipestream.data.module.v1.ProcessDataRequest;
+import ai.pipestream.data.module.v1.ProcessingOutcome;
 import ai.pipestream.data.module.v1.GetServiceRegistrationRequest;
 import ai.pipestream.data.module.v1.ServiceMetadata;
 import io.smallrye.mutiny.helpers.test.UniAssertSubscriber;
@@ -66,7 +67,7 @@ public abstract class ChunkerServiceTestBase {
                 .awaitItem()
                 .getItem();
 
-        assertThat("Response should be successful", response.getSuccess(), is(true));
+        assertThat("Response should be successful", response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
         assertThat("Response should have output document", response.hasOutputDoc(), is(true));
         assertThat("Output document ID should match input", response.getOutputDoc().getDocId(), is(testDoc.getDocId()));
         assertThat("Should have processor logs", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), is(not(empty())));
@@ -90,7 +91,7 @@ public abstract class ChunkerServiceTestBase {
                 .awaitItem()
                 .getItem();
 
-        assertThat("Chunker should handle missing document gracefully", response.getSuccess(), is(true));
+        assertThat("Chunker should handle missing document gracefully", response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
         assertThat("No document means no output should be produced", response.hasOutputDoc(), is(false));
         assertThat("Should log processing attempt for missing document", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), is(not(empty())));
         assertThat("Should acknowledge no document to process", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), hasItem(containsString("no document to process")));
@@ -127,7 +128,7 @@ public abstract class ChunkerServiceTestBase {
                 .awaitItem()
                 .getItem();
 
-        assertThat("Chunker should handle empty content without failing", response.getSuccess(), is(true));
+        assertThat("Chunker should handle empty content without failing", response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
         assertThat("Empty document should still produce output structure", response.hasOutputDoc(), is(true));
         assertThat("Document identity should be preserved through empty processing", response.getOutputDoc().getDocId(), is(testDoc.getDocId()));
         assertThat("Should log empty content handling", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), is(not(empty())));
@@ -181,7 +182,7 @@ public abstract class ChunkerServiceTestBase {
                 .awaitItem()
                 .getItem();
 
-        assertThat("Custom configuration should be processed successfully", response.getSuccess(), is(true));
+        assertThat("Custom configuration should be processed successfully", response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
         assertThat("Should produce chunked output document", response.hasOutputDoc(), is(true));
         
         var searchMetadata = response.getOutputDoc().getSearchMetadata();
@@ -246,7 +247,7 @@ public abstract class ChunkerServiceTestBase {
                 .awaitItem()
                 .getItem();
 
-        assertThat("URL preservation chunking should succeed", response.getSuccess(), is(true));
+        assertThat("URL preservation chunking should succeed", response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
         assertThat("Should produce output with URL handling", response.hasOutputDoc(), is(true));
         assertThat("Should create semantic results for URL content", response.getOutputDoc().getSearchMetadata().getSemanticResultsCount(), is(greaterThan(0)));
 
@@ -280,7 +281,7 @@ public abstract class ChunkerServiceTestBase {
                 .getItem();
 
         // Null request handling should be robust and informative
-        assertThat("Chunker should gracefully handle null input without crashing", response.getSuccess(), is(true));
+        assertThat("Chunker should gracefully handle null input without crashing", response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
         assertThat("Should provide diagnostic information for null request", response.getLogEntriesList().stream().map(LogEntry::getMessage).toList(), is(not(empty())));
         assertThat("Should log at least one meaningful message about null handling",
             response.getLogEntriesList().stream().map(LogEntry::getMessage).toList().size(), is(greaterThan(0)));

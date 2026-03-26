@@ -6,6 +6,7 @@ import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
 import ai.pipestream.data.module.v1.*;
+import ai.pipestream.data.module.v1.ProcessingOutcome;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
 import io.smallrye.mutiny.helpers.test.UniAssertSubscriber;
@@ -96,7 +97,7 @@ public class ChunkerConfigSchemaCompatibilityTest {
             .awaitItem()
             .getItem();
 
-        assertThat("ChunkerConfig JSON should be accepted", response.getSuccess(), is(true));
+        assertThat("ChunkerConfig JSON should be accepted", response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
         assertThat("Output document should be present", response.hasOutputDoc(), is(true));
         assertThat("Semantic results should be created", response.getOutputDoc().getSearchMetadata().getSemanticResultsCount(), is(greaterThan(0)));
 

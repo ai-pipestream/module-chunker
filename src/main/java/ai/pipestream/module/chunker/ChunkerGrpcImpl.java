@@ -75,7 +75,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 if (!request.hasDocument()) {
                     LOG.info(logPrefix + "No document provided in request");
                     return ProcessDataResponse.newBuilder()
-                            .setSuccess(true)
+                            .setOutcome(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS)
                             .addLogEntries(moduleLog("Chunker service: no document to process", LogLevel.LOG_LEVEL_INFO))
                             .build();
                 }
@@ -208,7 +208,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 long duration = System.currentTimeMillis() - startTime;
                 responseBuilder.addLogEntries(moduleLog(String.format("Chunking completed in %dms", duration), LogLevel.LOG_LEVEL_INFO));
 
-                responseBuilder.setSuccess(true);
+                responseBuilder.setOutcome(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS);
                 PipeDoc outputDoc = outputDocBuilder.build();
                 responseBuilder.setOutputDoc(outputDoc);
 
@@ -252,7 +252,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             LOG.debug("Performing health check with test request");
             return processData(request.getTestRequest())
                 .map(processResponse -> {
-                    if (processResponse.getSuccess()) {
+                    if (processResponse.getOutcome() == ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS) {
                         responseBuilder
                             .setHealthCheckPassed(true)
                             .setHealthCheckMessage("Chunker module is healthy - successfully processed test document");
@@ -304,7 +304,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
     private ProcessDataResponse createErrorResponse(String errorMessage, Exception e) {
         ProcessDataResponse.Builder responseBuilder = ProcessDataResponse.newBuilder();
-        responseBuilder.setSuccess(false);
+        responseBuilder.setOutcome(ProcessingOutcome.PROCESSING_OUTCOME_FAILURE);
         responseBuilder.addLogEntries(moduleLog(errorMessage, LogLevel.LOG_LEVEL_ERROR));
 
         Struct.Builder errorDetailsBuilder = Struct.newBuilder();

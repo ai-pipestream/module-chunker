@@ -3,6 +3,7 @@ package ai.pipestream.module.chunker;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.module.v1.*;
+import ai.pipestream.data.module.v1.ProcessingOutcome;
 import ai.pipestream.module.chunker.model.ChunkerOptions;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
@@ -105,7 +106,7 @@ public class DoubleChunkingTest {
                 ProcessDataResponse response = chunkerService.processData(request)
                     .await().indefinitely();
 
-                if (response.getSuccess() && response.hasOutputDoc()) {
+                if (response.getOutcome() == ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS && response.hasOutputDoc()) {
                     chunkedDocs.add(response.getOutputDoc());
                     log.debug("First chunking successful for doc: {}", doc.getDocId());
                 } else {
@@ -140,7 +141,7 @@ public class DoubleChunkingTest {
                 ProcessDataResponse response = chunkerService.processData(request)
                     .await().indefinitely();
 
-                if (response.getSuccess() && response.hasOutputDoc()) {
+                if (response.getOutcome() == ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS && response.hasOutputDoc()) {
                     doubleChunkedDocs.add(response.getOutputDoc());
                     log.debug("Second chunking successful for doc: {}", doc.getDocId());
                 } else {

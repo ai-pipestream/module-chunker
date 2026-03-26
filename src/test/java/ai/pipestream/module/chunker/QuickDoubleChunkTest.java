@@ -4,6 +4,7 @@ import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
 import ai.pipestream.data.module.v1.*;
+import ai.pipestream.data.module.v1.ProcessingOutcome;
 import ai.pipestream.module.chunker.model.ChunkerOptions;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
@@ -73,7 +74,7 @@ public class QuickDoubleChunkTest {
             ProcessDataResponse response = chunkerService.processData(request)
                 .await().atMost(java.time.Duration.ofSeconds(30));
 
-            return response.getSuccess() ? response.getOutputDoc() : doc;
+            return response.getOutcome() == ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS ? response.getOutputDoc() : doc;
         } catch (Exception e) {
             log.error("Chunking failed: {}", e.getMessage());
             return doc;
