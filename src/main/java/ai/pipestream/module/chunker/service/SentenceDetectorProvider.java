@@ -20,7 +20,7 @@ import java.io.InputStream;
 public class SentenceDetectorProvider {
 
     private static final Logger LOG = Logger.getLogger(SentenceDetectorProvider.class);
-    private static final String MODEL_PATH = "/models/en-sent.bin";
+    private static final String MODEL_PATH = "opennlp-en-ud-ewt-sentence-1.3-2.5.4.bin";
 
     /**
      * Creates a simple fallback sentence detector when the model is not available.
@@ -56,7 +56,7 @@ public class SentenceDetectorProvider {
     @Produces
     @Singleton
     public SentenceDetector createSentenceDetector() {
-        try (InputStream modelIn = getClass().getResourceAsStream(MODEL_PATH)) {
+        try (InputStream modelIn = Thread.currentThread().getContextClassLoader().getResourceAsStream(MODEL_PATH)) {
             if (modelIn == null) {
                 LOG.warn("Sentence detector model not found at " + MODEL_PATH + ". Using simple sentence detector.");
                 return createFallbackDetector();

@@ -20,7 +20,7 @@ import java.io.InputStream;
 public class TokenizerProvider {
 
     private static final Logger LOG = Logger.getLogger(TokenizerProvider.class);
-    private static final String MODEL_PATH = "/models/en-token.bin";
+    private static final String MODEL_PATH = "opennlp-en-ud-ewt-tokens-1.3-2.5.4.bin";
 
     /**
      * Creates a simple fallback tokenizer when the model is not available.
@@ -40,7 +40,7 @@ public class TokenizerProvider {
     @Produces
     @Singleton
     public Tokenizer createTokenizer() {
-        try (InputStream modelIn = getClass().getResourceAsStream(MODEL_PATH)) {
+        try (InputStream modelIn = Thread.currentThread().getContextClassLoader().getResourceAsStream(MODEL_PATH)) {
             if (modelIn == null) {
                 LOG.warn("Tokenizer model not found at " + MODEL_PATH + ". Using simple tokenizer.");
                 return createFallbackTokenizer();
