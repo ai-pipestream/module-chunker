@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.text.DecimalFormat;
 import java.util.*;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Extracts metadata from text chunks to provide additional context and information.
@@ -230,6 +231,79 @@ public class ChunkMetadataExtractor {
         }
 
         return builder.build();
+    }
+
+    /**
+     * Extracts typed DocumentAnalytics proto for a full source text, enriched with NLP data.
+     * Uses pre-computed NlpResult to populate POS/language fields without re-running NLP.
+     *
+     * @param fullText The full source text
+     * @param nlpResult Pre-computed NLP analysis results
+     * @return DocumentAnalytics proto with POS/language fields populated
+     */
+    public DocumentAnalytics extractDocumentAnalytics(String fullText, NlpPreprocessor.NlpResult nlpResult) {
+        // Start with the base analytics (word count, sentence count, etc.)
+        DocumentAnalytics base = extractDocumentAnalytics(fullText);
+
+        if (nlpResult == null || nlpResult.tokens().length == 0) {
+            return base;
+        }
+
+        // Enrich with NLP-derived fields
+        return base.toBuilder()
+                .setDetectedLanguage(nlpResult.detectedLanguage())
+                .setLanguageConfidence(nlpResult.languageConfidence())
+                .setNounDensity(nlpResult.nounDensity())
+                .setVerbDensity(nlpResult.verbDensity())
+                .setAdjectiveDensity(nlpResult.adjectiveDensity())
+                .setContentWordRatio(nlpResult.contentWordRatio())
+                .setUniqueLemmaCount(nlpResult.uniqueLemmaCount())
+                .setLexicalDensity(nlpResult.lexicalDensity())
+                .build();
+    }
+
+    /**
+     * Extracts typed ChunkAnalytics proto for a chunk, enriched with NLP POS data.
+     * Runs a lightweight NLP pass on the chunk text to compute chunk-level POS ratios.
+     *
+     * @param chunkText The text content of the chunk
+     * @param chunkNumber The position of this chunk in the sequence (0-based)
+     * @param totalChunks Total number of chunks in the document
+     * @param containsUrlPlaceholder Whether the chunk contains URL placeholders
+     * @param nlpPreprocessor NlpPreprocessor to run on the chunk text
+     * @return ChunkAnalytics proto with POS fields populated
+     */
+    public ChunkAnalytics extractChunkAnalytics(String chunkText, int chunkNumber, int totalChunks,
+                                                 boolean containsUrlPlaceholder,
+                                                 NlpPreprocessor nlpPreprocessor) {
+        // Start with the base chunk analytics
+        ChunkAnalytics base = extractChunkAnalytics(chunkText, chunkNumber, totalChunks, containsUrlPlaceholder);
+
+        if (nlpPreprocessor == null || StringUtils.isBlank(chunkText)) {
+            return base;
+        }
+
+        // Run NLP on the chunk text for chunk-level POS ratios
+        NlpPreprocessor.NlpResult chunkNlp = nlpPreprocessor.preprocess(chunkText);
+
+        if (chunkNlp.tokens().length == 0) {
+            return base;
+        }
+
+        // Compute unique lemma count for this chunk
+        int chunkUniqueLemmaCount = (int) Arrays.stream(chunkNlp.lemmas())
+                .filter(l -> !"O".equals(l))
+                .collect(Collectors.toSet())
+                .size();
+
+        return base.toBuilder()
+                .setNounDensity(chunkNlp.nounDensity())
+                .setVerbDensity(chunkNlp.verbDensity())
+                .setAdjectiveDensity(chunkNlp.adjectiveDensity())
+                .setContentWordRatio(chunkNlp.contentWordRatio())
+                .setUniqueLemmaCount(chunkUniqueLemmaCount)
+                .setLexicalDensity(chunkNlp.lexicalDensity())
+                .build();
     }
 
     /**
