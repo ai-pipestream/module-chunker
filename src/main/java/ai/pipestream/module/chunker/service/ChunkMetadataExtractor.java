@@ -58,7 +58,7 @@ public class ChunkMetadataExtractor {
         int characterCount = chunkText.length();
         metadataMap.put("character_count", Value.newBuilder().setNumberValue(characterCount).build());
 
-        String[] sentences = sentenceDetector.sentDetect(chunkText);
+        String[] sentences = safeSentDetect(chunkText);
         int sentenceCount = sentences.length;
         metadataMap.put("sentence_count", Value.newBuilder().setNumberValue(sentenceCount).build());
 
@@ -128,7 +128,7 @@ public class ChunkMetadataExtractor {
         }
 
         int characterCount = chunkText.length();
-        String[] sentences = sentenceDetector.sentDetect(chunkText);
+        String[] sentences = safeSentDetect(chunkText);
         String[] tokens = tokenizer.tokenize(chunkText);
         int wordCount = tokens.length;
         int sentenceCount = sentences.length;
@@ -191,7 +191,7 @@ public class ChunkMetadataExtractor {
         }
 
         int characterCount = fullText.length();
-        String[] sentences = sentenceDetector.sentDetect(fullText);
+        String[] sentences = safeSentDetect(fullText);
         String[] tokens = tokenizer.tokenize(fullText);
         int wordCount = tokens.length;
         int sentenceCount = sentences.length;
@@ -361,6 +361,36 @@ public class ChunkMetadataExtractor {
      * @param sentenceCount The number of sentences in the chunk
      * @return A score between 0.0 and 1.0
      */
+    /**
+     * Safely detect sentences, avoiding OpenNLP's internal NPE on null spans.
+     * sentDetect() calls Span.spansToStrings() internally which NPEs when the model
+     * produces null spans (common with parsed PDFs/HTML containing funky formatting).
+     */
+    private String[] safeSentDetect(String text) {
+        try {
+            opennlp.tools.util.Span[] spans = sentenceDetector.sentPosDetect(text);
+            int textLen = text.length();
+            // Count valid spans, derive strings manually
+            int valid = 0;
+            for (opennlp.tools.util.Span s : spans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    valid++;
+                }
+            }
+            String[] result = new String[valid];
+            int idx = 0;
+            for (opennlp.tools.util.Span s : spans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    result[idx++] = text.substring(s.getStart(), s.getEnd());
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            // Last resort fallback — treat entire text as one sentence
+            return new String[]{text};
+        }
+    }
+
     private double calculatePotentialHeadingScore(String chunkText, String[] tokens, int sentenceCount) {
         double score = 0.0;
         if (tokens.length == 0) return 0.0;

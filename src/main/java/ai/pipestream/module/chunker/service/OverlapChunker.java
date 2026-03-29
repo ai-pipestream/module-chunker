@@ -662,8 +662,33 @@ public class OverlapChunker {
             sentenceSpans = nlpResult.sentenceSpans();
             LOG.debugf("Using pre-computed NLP sentences (%d sentences) for document ID: %s", sentences.length, documentId);
         } else {
-            sentences = sentenceDetector.sentDetect(textToProcess);
+            // Use sentPosDetect first, derive strings manually — sentDetect() NPEs on null spans
             sentenceSpans = sentenceDetector.sentPosDetect(textToProcess);
+            int textLen = textToProcess.length();
+            int valid = 0;
+            for (opennlp.tools.util.Span s : sentenceSpans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) valid++;
+            }
+            if (valid < sentenceSpans.length) {
+                // Sanitize: filter out null/invalid spans
+                opennlp.tools.util.Span[] cleanSpans = new opennlp.tools.util.Span[valid];
+                String[] cleanSentences = new String[valid];
+                int idx = 0;
+                for (opennlp.tools.util.Span s : sentenceSpans) {
+                    if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                        cleanSpans[idx] = s;
+                        cleanSentences[idx] = textToProcess.substring(s.getStart(), s.getEnd());
+                        idx++;
+                    }
+                }
+                sentenceSpans = cleanSpans;
+                sentences = cleanSentences;
+            } else {
+                sentences = new String[sentenceSpans.length];
+                for (int i = 0; i < sentenceSpans.length; i++) {
+                    sentences[i] = textToProcess.substring(sentenceSpans[i].getStart(), sentenceSpans[i].getEnd());
+                }
+            }
         }
         
         if (sentences.length == 0) {
