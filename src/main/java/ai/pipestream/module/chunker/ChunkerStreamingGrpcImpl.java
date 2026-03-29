@@ -78,7 +78,8 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
     // =========================================================================
 
     private Multi<StreamChunksResponse> streamChunksMultiConfig(StreamChunksRequest request) {
-        return Multi.createFrom().emitter(emitter -> {
+        // Run NLP + chunking on worker thread — these are CPU-bound and must not block the Vert.x event loop
+        return Multi.createFrom().<StreamChunksResponse>emitter(emitter -> {
             try {
                 String requestId = request.getRequestId();
                 String docId = request.getDocId();
@@ -131,7 +132,8 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                         Map<String, com.google.protobuf.Value> chunkMetadata = metadataExtractor.extractAllMetadata(
                                 chunk.text(), i, chunks.size(), false);
                         ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
-                                chunk.text(), i, chunks.size(), false, nlpPreprocessor);
+                                chunk.text(), i, chunks.size(), false,
+                                nlpResult, chunk.originalIndexStart(), chunk.originalIndexEnd());
 
                         // Compute SHA-256 content hash
                         String contentHash = sha256Hex(chunk.text());
@@ -173,7 +175,7 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                 LOG.errorf(e, "Error in StreamChunks (multi-config): %s", e.getMessage());
                 emitter.fail(e);
             }
-        });
+        }).runSubscriptionOn(io.smallrye.mutiny.infrastructure.Infrastructure.getDefaultWorkerPool());
     }
 
     // =========================================================================

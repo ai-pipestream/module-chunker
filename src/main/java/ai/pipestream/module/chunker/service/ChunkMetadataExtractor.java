@@ -273,37 +273,83 @@ public class ChunkMetadataExtractor {
      * @param nlpPreprocessor NlpPreprocessor to run on the chunk text
      * @return ChunkAnalytics proto with POS fields populated
      */
+    /**
+     * Extracts chunk analytics by slicing the document-level NLP arrays.
+     * No NLP re-execution — just finds the token range for this chunk's character
+     * offsets and computes POS ratios from that slice. O(log n) binary search + O(k) scan.
+     */
     public ChunkAnalytics extractChunkAnalytics(String chunkText, int chunkNumber, int totalChunks,
                                                  boolean containsUrlPlaceholder,
-                                                 NlpPreprocessor nlpPreprocessor) {
-        // Start with the base chunk analytics
+                                                 NlpPreprocessor.NlpResult docNlpResult,
+                                                 int chunkStartOffset, int chunkEndOffset) {
         ChunkAnalytics base = extractChunkAnalytics(chunkText, chunkNumber, totalChunks, containsUrlPlaceholder);
 
-        if (nlpPreprocessor == null || StringUtils.isBlank(chunkText)) {
+        if (docNlpResult == null || docNlpResult.tokens().length == 0 || StringUtils.isBlank(chunkText)) {
             return base;
         }
 
-        // Run NLP on the chunk text for chunk-level POS ratios
-        NlpPreprocessor.NlpResult chunkNlp = nlpPreprocessor.preprocess(chunkText);
+        // Binary search for first token at or after chunkStartOffset
+        opennlp.tools.util.Span[] spans = docNlpResult.tokenSpans();
+        String[] posTags = docNlpResult.posTags();
+        String[] lemmas = docNlpResult.lemmas();
 
-        if (chunkNlp.tokens().length == 0) {
+        int firstToken = findFirstTokenAtOrAfter(spans, chunkStartOffset);
+        int lastToken = findLastTokenBefore(spans, chunkEndOffset);
+
+        if (firstToken < 0 || lastToken < firstToken) {
             return base;
         }
 
-        // Compute unique lemma count for this chunk
-        int chunkUniqueLemmaCount = (int) Arrays.stream(chunkNlp.lemmas())
-                .filter(l -> !"O".equals(l))
-                .collect(Collectors.toSet())
-                .size();
+        // Count POS tags in this chunk's token range
+        int total = lastToken - firstToken + 1;
+        int nouns = 0, verbs = 0, adjectives = 0, adverbs = 0;
+        Set<String> uniqueLemmas = new HashSet<>();
+
+        for (int i = firstToken; i <= lastToken; i++) {
+            String tag = posTags[i];
+            if ("NOUN".equals(tag) || "PROPN".equals(tag)) nouns++;
+            else if ("VERB".equals(tag) || "AUX".equals(tag)) verbs++;
+            else if ("ADJ".equals(tag)) adjectives++;
+            else if ("ADV".equals(tag)) adverbs++;
+
+            String lemma = lemmas[i];
+            if (lemma != null && !"O".equals(lemma) && !lemma.isBlank()) {
+                uniqueLemmas.add(lemma.toLowerCase());
+            }
+        }
+
+        int contentWords = nouns + verbs + adjectives + adverbs;
 
         return base.toBuilder()
-                .setNounDensity(chunkNlp.nounDensity())
-                .setVerbDensity(chunkNlp.verbDensity())
-                .setAdjectiveDensity(chunkNlp.adjectiveDensity())
-                .setContentWordRatio(chunkNlp.contentWordRatio())
-                .setUniqueLemmaCount(chunkUniqueLemmaCount)
-                .setLexicalDensity(chunkNlp.lexicalDensity())
+                .setNounDensity(total > 0 ? (float) nouns / total : 0)
+                .setVerbDensity(total > 0 ? (float) verbs / total : 0)
+                .setAdjectiveDensity(total > 0 ? (float) adjectives / total : 0)
+                .setContentWordRatio(total > 0 ? (float) contentWords / total : 0)
+                .setUniqueLemmaCount(uniqueLemmas.size())
+                .setLexicalDensity(total > 0 ? (float) contentWords / total : 0)
                 .build();
+    }
+
+    /** Finds the first token whose start offset is >= targetOffset. */
+    private int findFirstTokenAtOrAfter(opennlp.tools.util.Span[] spans, int targetOffset) {
+        int lo = 0, hi = spans.length;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (spans[mid].getStart() < targetOffset) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo < spans.length ? lo : -1;
+    }
+
+    /** Finds the last token whose start offset is < targetOffset. */
+    private int findLastTokenBefore(opennlp.tools.util.Span[] spans, int targetOffset) {
+        int lo = 0, hi = spans.length;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (spans[mid].getStart() < targetOffset) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo - 1;
     }
 
     /**

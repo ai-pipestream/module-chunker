@@ -12,9 +12,9 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Provider for OpenNLP POS Tagger.
- * Loads the English POS model from the Maven model artifact on the classpath.
- * Returns null if the model is unavailable (graceful degradation).
+ * Provider for OpenNLP POS Tagger model and instances.
+ * Loads the English POS model once from the Maven model artifact.
+ * Exposes the POSModel (thread-safe) so callers can create per-thread POSTaggerME instances.
  */
 @ApplicationScoped
 public class POSTaggerProvider {
@@ -22,25 +22,39 @@ public class POSTaggerProvider {
     private static final Logger LOG = Logger.getLogger(POSTaggerProvider.class);
     private static final String MODEL_PATH = "opennlp-en-ud-ewt-pos-1.3-2.5.4.bin";
 
+    private volatile POSModel posModel;
+
     /**
-     * Produces a singleton instance of the OpenNLP POS Tagger.
-     *
-     * @return A POSTagger instance, or null if the model is unavailable
+     * Produces a singleton POSTagger for simple single-threaded use.
      */
     @Produces
     @Singleton
     public POSTagger createPOSTagger() {
-        try (InputStream modelIn = Thread.currentThread().getContextClassLoader().getResourceAsStream(MODEL_PATH)) {
-            if (modelIn == null) {
-                LOG.warn("POS tagger model not found at " + MODEL_PATH + ". POS tagging will be unavailable.");
-                return null;
-            }
+        POSModel model = getModel();
+        return model != null ? new POSTaggerME(model) : null;
+    }
 
-            POSModel model = new POSModel(modelIn);
-            return new POSTaggerME(model);
-        } catch (IOException e) {
-            LOG.error("Error loading POS tagger model", e);
-            return null;
+    /**
+     * Returns the thread-safe POSModel, or null if unavailable.
+     * Callers needing thread-safety should create their own POSTaggerME(model) per thread.
+     */
+    public POSModel getModel() {
+        if (posModel == null) {
+            synchronized (this) {
+                if (posModel == null) {
+                    try (InputStream modelIn = Thread.currentThread().getContextClassLoader().getResourceAsStream(MODEL_PATH)) {
+                        if (modelIn == null) {
+                            LOG.warn("POS tagger model not found at " + MODEL_PATH);
+                            return null;
+                        }
+                        posModel = new POSModel(modelIn);
+                        LOG.info("Loaded POS tagger model");
+                    } catch (IOException e) {
+                        LOG.error("Error loading POS tagger model", e);
+                    }
+                }
+            }
         }
+        return posModel;
     }
 }

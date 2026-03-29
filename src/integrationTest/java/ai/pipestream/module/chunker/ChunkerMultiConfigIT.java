@@ -56,10 +56,13 @@ class ChunkerMultiConfigIT {
         int port = ConfigProvider.getConfig().getValue("quarkus.http.test-port", Integer.class);
         LOG.infof("Connecting gRPC client to localhost:%d", port);
 
-        channel = ManagedChannelBuilder.forAddress("localhost", port)
+        channel = io.grpc.netty.NettyChannelBuilder.forAddress("localhost", port)
                 .usePlaintext()
+                .maxInboundMessageSize(Integer.MAX_VALUE)
+                .flowControlWindow(100 * 1024 * 1024) // 100MB HTTP/2 flow control window
                 .build();
-        stub = SemanticChunkerServiceGrpc.newBlockingStub(channel);
+        stub = SemanticChunkerServiceGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(5, TimeUnit.MINUTES);
     }
 
     @AfterEach
@@ -536,6 +539,160 @@ class ChunkerMultiConfigIT {
         assertThat(chunks)
                 .as("Empty text should return zero chunks (no error)")
                 .isEmpty();
+    }
+
+    // =========================================================================
+    // Test 7: Gray's Anatomy — dense medical text (544KB)
+    // =========================================================================
+
+    @Test
+    void medicalTextGreysAnatomy() {
+        String text = loadResource("test-data/grays_anatomy.txt");
+        LOG.infof("Gray's Anatomy: %d chars", text.length());
+
+        StreamChunksRequest request = StreamChunksRequest.newBuilder()
+                .setRequestId(UUID.randomUUID().toString())
+                .setDocId("grays-anatomy")
+                .setSourceFieldName("body")
+                .setTextContent(text)
+                .addChunkConfigs(ChunkConfigEntry.newBuilder()
+                        .setChunkConfigId("sentence_10_2")
+                        .setConfig(ChunkerConfig.newBuilder()
+                                .setAlgorithm(ChunkAlgorithm.CHUNK_ALGORITHM_SENTENCE)
+                                .setChunkSize(10).setChunkOverlap(2).build())
+                        .build())
+                .addChunkConfigs(ChunkConfigEntry.newBuilder()
+                        .setChunkConfigId("token_500_50")
+                        .setConfig(ChunkerConfig.newBuilder()
+                                .setAlgorithm(ChunkAlgorithm.CHUNK_ALGORITHM_TOKEN)
+                                .setChunkSize(500).setChunkOverlap(50).build())
+                        .build())
+                .build();
+
+        long start = System.currentTimeMillis();
+        List<StreamChunksResponse> chunks = collectResponses(stub.streamChunks(request));
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertThat(chunks).as("Medical text should produce chunks").isNotEmpty();
+
+        List<StreamChunksResponse> sentenceChunks = filterByConfigId(chunks, "sentence_10_2");
+        List<StreamChunksResponse> tokenChunks = filterByConfigId(chunks, "token_500_50");
+
+        assertThat(sentenceChunks).as("Sentence config should produce chunks").isNotEmpty();
+        assertThat(tokenChunks).as("Token config should produce chunks").isNotEmpty();
+
+        // Verify NLP detected English
+        StreamChunksResponse lastChunk = chunks.get(chunks.size() - 1);
+        assertThat(lastChunk.hasNlpAnalysis()).as("Last chunk should have NLP analysis").isTrue();
+        assertThat(lastChunk.getNlpAnalysis().getDetectedLanguage())
+                .as("Medical text should be detected as English").isEqualTo("eng");
+
+        // Medical text should have high noun density (anatomy terms)
+        assertThat(lastChunk.getNlpAnalysis().getNounDensity())
+                .as("Medical text should have significant noun density").isGreaterThan(0.15f);
+
+        LOG.infof("Gray's Anatomy: %d total chunks (%d sentence, %d token) in %dms",
+                chunks.size(), sentenceChunks.size(), tokenChunks.size(), elapsed);
+    }
+
+    // =========================================================================
+    // Test 8: Blackstone's Commentaries — formal legal text (234KB)
+    // =========================================================================
+
+    @Test
+    void legalTextBlackstone() {
+        String text = loadResource("test-data/blackstone_commentaries.txt");
+        LOG.infof("Blackstone: %d chars", text.length());
+
+        StreamChunksRequest request = StreamChunksRequest.newBuilder()
+                .setRequestId(UUID.randomUUID().toString())
+                .setDocId("blackstone")
+                .setSourceFieldName("body")
+                .setTextContent(text)
+                .addChunkConfigs(ChunkConfigEntry.newBuilder()
+                        .setChunkConfigId("sentence_5_1")
+                        .setConfig(ChunkerConfig.newBuilder()
+                                .setAlgorithm(ChunkAlgorithm.CHUNK_ALGORITHM_SENTENCE)
+                                .setChunkSize(5).setChunkOverlap(1).build())
+                        .build())
+                .addChunkConfigs(ChunkConfigEntry.newBuilder()
+                        .setChunkConfigId("token_300_30")
+                        .setConfig(ChunkerConfig.newBuilder()
+                                .setAlgorithm(ChunkAlgorithm.CHUNK_ALGORITHM_TOKEN)
+                                .setChunkSize(300).setChunkOverlap(30).build())
+                        .build())
+                .build();
+
+        long start = System.currentTimeMillis();
+        List<StreamChunksResponse> chunks = collectResponses(stub.streamChunks(request));
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertThat(chunks).as("Legal text should produce chunks").isNotEmpty();
+        assertThat(filterByConfigId(chunks, "sentence_5_1")).as("Sentence chunks").isNotEmpty();
+        assertThat(filterByConfigId(chunks, "token_300_30")).as("Token chunks").isNotEmpty();
+
+        // Legal text: verify content word ratio is reasonable
+        StreamChunksResponse lastChunk = chunks.get(chunks.size() - 1);
+        assertThat(lastChunk.getNlpAnalysis().getContentWordRatio())
+                .as("Legal text content word ratio should be between 0.3 and 0.8")
+                .isBetween(0.3f, 0.8f);
+
+        LOG.infof("Blackstone: %d total chunks in %dms", chunks.size(), elapsed);
+    }
+
+    // =========================================================================
+    // Test 9: King James Bible — stress test (4.5MB, ~800K tokens)
+    // =========================================================================
+
+    @Test
+    void stressTestBibleKJV() {
+        String text = loadResource("test-data/bible_kjv.txt");
+        LOG.infof("Bible KJV: %d chars (~%.1f MB)", text.length(), text.length() / 1_000_000.0);
+
+        // Single config to keep it manageable — the NLP pass is the expensive part
+        StreamChunksRequest request = StreamChunksRequest.newBuilder()
+                .setRequestId(UUID.randomUUID().toString())
+                .setDocId("bible-kjv")
+                .setSourceFieldName("body")
+                .setTextContent(text)
+                .addChunkConfigs(ChunkConfigEntry.newBuilder()
+                        .setChunkConfigId("token_500_50")
+                        .setConfig(ChunkerConfig.newBuilder()
+                                .setAlgorithm(ChunkAlgorithm.CHUNK_ALGORITHM_TOKEN)
+                                .setChunkSize(500).setChunkOverlap(50).build())
+                        .build())
+                .addChunkConfigs(ChunkConfigEntry.newBuilder()
+                        .setChunkConfigId("sentence_10_2")
+                        .setConfig(ChunkerConfig.newBuilder()
+                                .setAlgorithm(ChunkAlgorithm.CHUNK_ALGORITHM_SENTENCE)
+                                .setChunkSize(10).setChunkOverlap(2).build())
+                        .build())
+                .build();
+
+        long start = System.currentTimeMillis();
+        List<StreamChunksResponse> chunks = collectResponses(stub.streamChunks(request));
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertThat(chunks).as("Bible should produce many chunks").hasSizeGreaterThan(100);
+
+        List<StreamChunksResponse> tokenChunks = filterByConfigId(chunks, "token_500_50");
+        List<StreamChunksResponse> sentenceChunks = filterByConfigId(chunks, "sentence_10_2");
+
+        assertThat(tokenChunks).as("Token chunks from Bible").hasSizeGreaterThan(50);
+        assertThat(sentenceChunks).as("Sentence chunks from Bible").hasSizeGreaterThan(50);
+
+        // NLP analysis
+        StreamChunksResponse lastChunk = chunks.get(chunks.size() - 1);
+        assertThat(lastChunk.hasNlpAnalysis()).as("Should have NLP analysis").isTrue();
+        NlpDocumentAnalysis nlp = lastChunk.getNlpAnalysis();
+        LOG.infof("Bible detected language: %s (confidence: %.4f)", nlp.getDetectedLanguage(), nlp.getLanguageConfidence());
+        assertThat(nlp.getTotalTokens()).as("Bible should have many tokens").isGreaterThan(100000);
+        assertThat(nlp.getSentencesCount()).as("Bible should have many sentences").isGreaterThan(1000);
+        assertThat(nlp.getUniqueLemmaCount()).as("Bible should have rich vocabulary").isGreaterThan(5000);
+
+        LOG.infof("Bible KJV stress test: %d total chunks (%d token, %d sentence), %d tokens, %d sentences, %d unique lemmas in %dms",
+                chunks.size(), tokenChunks.size(), sentenceChunks.size(),
+                nlp.getTotalTokens(), nlp.getSentencesCount(), nlp.getUniqueLemmaCount(), elapsed);
     }
 
     // =========================================================================

@@ -6,14 +6,21 @@ import jakarta.inject.Inject;
 import opennlp.tools.langdetect.Language;
 import opennlp.tools.langdetect.LanguageDetector;
 import opennlp.tools.lemmatizer.Lemmatizer;
+import opennlp.tools.postag.POSModel;
 import opennlp.tools.postag.POSTagger;
+import opennlp.tools.postag.POSTaggerME;
 import opennlp.tools.sentdetect.SentenceDetector;
 import opennlp.tools.tokenize.Tokenizer;
 import opennlp.tools.util.Span;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
 /**
@@ -38,11 +45,15 @@ public class NlpPreprocessor {
     /** Sentinel value returned by DictionaryLemmatizer for unknown words. */
     private static final String LEMMA_UNKNOWN = "O";
 
+    /** Number of virtual threads for parallel sentence tagging. */
+    private static final int PARALLELISM = Runtime.getRuntime().availableProcessors();
+
     private final Tokenizer tokenizer;
     private final SentenceDetector sentenceDetector;
     private final Instance<POSTagger> posTaggerInstance;
     private final Instance<Lemmatizer> lemmatizerInstance;
     private final Instance<LanguageDetector> languageDetectorInstance;
+    private final POSTaggerProvider posTaggerProvider;
 
     @Inject
     public NlpPreprocessor(
@@ -50,12 +61,15 @@ public class NlpPreprocessor {
             SentenceDetector sentenceDetector,
             Instance<POSTagger> posTaggerInstance,
             Instance<Lemmatizer> lemmatizerInstance,
-            Instance<LanguageDetector> languageDetectorInstance) {
+            Instance<LanguageDetector> languageDetectorInstance,
+            POSTaggerProvider posTaggerProvider) {
         this.tokenizer = tokenizer;
         this.sentenceDetector = sentenceDetector;
         this.posTaggerInstance = posTaggerInstance;
         this.lemmatizerInstance = lemmatizerInstance;
         this.languageDetectorInstance = languageDetectorInstance;
+        this.posTaggerProvider = posTaggerProvider;
+        LOG.infof("NlpPreprocessor initialized with parallelism=%d", PARALLELISM);
     }
 
     /**
@@ -121,11 +135,13 @@ public class NlpPreprocessor {
         String[] sentences = sentenceDetector.sentDetect(text);
         Span[] sentenceSpans = sentenceDetector.sentPosDetect(text);
 
-        // Step 3: POS tagging (optional)
-        String[] posTags = tagTokens(tokens);
-
-        // Step 4: Lemmatization (optional, requires POS tags)
-        String[] lemmas = lemmatizeTokens(tokens, posTags);
+        // Step 3 + 4: POS tagging + lemmatization PER SENTENCE (not whole document).
+        // POS tagger uses Viterbi beam search — O(n × k²) per sequence.
+        // Tagging 800K tokens as one sequence is catastrophic; tagging 30K sentences
+        // of ~25 tokens each is fast.
+        String[] posTags = new String[tokens.length];
+        String[] lemmas = new String[tokens.length];
+        tagAndLemmatizePerSentence(text, sentences, sentenceSpans, tokens, tokenSpans, posTags, lemmas);
 
         // Step 5: Language detection (optional)
         String detectedLanguage = "";
@@ -196,45 +212,118 @@ public class NlpPreprocessor {
         );
     }
 
-    private String[] tagTokens(String[] tokens) {
-        if (tokens.length == 0) {
-            return new String[0];
+    /**
+     * Represents a sentence's tokens and their position in the document-level arrays.
+     */
+    private record SentenceWork(int firstTokenIdx, int tokenCount, String[] sentTokens) {}
+
+    /**
+     * POS tags and lemmatizes tokens per sentence, using parallel virtual threads.
+     * <p>
+     * POSTaggerME uses Viterbi beam search — O(n × k²) per sequence. Tagging 800K tokens
+     * as one sequence takes minutes; tagging 30K sentences of ~25 tokens each takes seconds.
+     * <p>
+     * POSTaggerME is NOT thread-safe (stores bestSequence as instance state), so each virtual
+     * thread creates its own tagger from the shared thread-safe POSModel.
+     */
+    private void tagAndLemmatizePerSentence(String text, String[] sentences, Span[] sentenceSpans,
+                                             String[] tokens, Span[] tokenSpans,
+                                             String[] posTags, String[] lemmas) {
+        // Initialize defaults
+        Arrays.fill(posTags, "");
+        for (int i = 0; i < lemmas.length; i++) {
+            lemmas[i] = tokens[i];
         }
-        if (posTaggerInstance.isResolvable()) {
-            POSTagger tagger = posTaggerInstance.get();
-            if (tagger != null) {
-                try {
-                    return tagger.tag(tokens);
-                } catch (Exception e) {
-                    LOG.warn("POS tagging failed, returning empty tags", e);
-                }
+
+        POSModel model = posTaggerProvider.getModel();
+        Lemmatizer sharedLemmatizer = null;
+        if (lemmatizerInstance.isResolvable()) {
+            sharedLemmatizer = lemmatizerInstance.get();
+        }
+
+        if (model == null && sharedLemmatizer == null) {
+            return;
+        }
+
+        // Build sentence work items: map tokens to sentences by character offsets
+        SentenceWork[] work = new SentenceWork[sentenceSpans.length];
+        int tokenIdx = 0;
+        for (int s = 0; s < sentenceSpans.length; s++) {
+            int sentEnd = sentenceSpans[s].getEnd();
+            int firstToken = tokenIdx;
+            while (tokenIdx < tokenSpans.length && tokenSpans[tokenIdx].getStart() < sentEnd) {
+                tokenIdx++;
             }
-        } else {
-            LOG.debug("POS tagger not available, returning empty tags");
+            int tokenCount = tokenIdx - firstToken;
+            if (tokenCount == 0) {
+                work[s] = new SentenceWork(firstToken, 0, new String[0]);
+                continue;
+            }
+            String[] sentTokens = new String[tokenCount];
+            System.arraycopy(tokens, firstToken, sentTokens, 0, tokenCount);
+            work[s] = new SentenceWork(firstToken, tokenCount, sentTokens);
         }
-        // Fallback: empty strings for each token
-        String[] empty = new String[tokens.length];
-        Arrays.fill(empty, "");
-        return empty;
+
+        // For small documents (< 100 sentences), process sequentially — no thread overhead
+        if (sentenceSpans.length < 100) {
+            POSTagger tagger = model != null ? new POSTaggerME(model) : null;
+            for (SentenceWork sw : work) {
+                tagAndLemmatizeSentence(sw, tagger, sharedLemmatizer, posTags, lemmas);
+            }
+            return;
+        }
+
+        // For large documents, parallel process with virtual threads.
+        // Each thread gets its own POSTaggerME (not thread-safe) from shared POSModel (thread-safe).
+        final POSModel finalModel = model;
+        final Lemmatizer finalLemmatizer = sharedLemmatizer;
+
+        LOG.infof("Parallel NLP: %d sentences across virtual threads", sentenceSpans.length);
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<?>> futures = new ArrayList<>();
+            for (SentenceWork sw : work) {
+                if (sw.tokenCount == 0) continue;
+                futures.add(executor.submit(() -> {
+                    // Each virtual thread gets its own POSTaggerME — not thread-safe
+                    POSTagger threadTagger = finalModel != null ? new POSTaggerME(finalModel) : null;
+                    tagAndLemmatizeSentence(sw, threadTagger, finalLemmatizer, posTags, lemmas);
+                }));
+            }
+            for (Future<?> f : futures) {
+                f.get();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warn("Parallel NLP interrupted", e);
+        } catch (Exception e) {
+            LOG.warn("Parallel NLP failed, results may be partial", e);
+        }
     }
 
-    private String[] lemmatizeTokens(String[] tokens, String[] posTags) {
-        if (tokens.length == 0) {
-            return new String[0];
-        }
-        if (lemmatizerInstance.isResolvable()) {
-            Lemmatizer lemmatizer = lemmatizerInstance.get();
-            if (lemmatizer != null) {
-                try {
-                    return lemmatizer.lemmatize(tokens, posTags);
-                } catch (Exception e) {
-                    LOG.warn("Lemmatization failed, returning raw tokens", e);
-                }
+    private void tagAndLemmatizeSentence(SentenceWork sw, POSTagger tagger,
+                                          Lemmatizer lemmatizer,
+                                          String[] posTags, String[] lemmas) {
+        if (sw.tokenCount == 0) return;
+
+        String[] sentTags = null;
+        if (tagger != null) {
+            try {
+                sentTags = tagger.tag(sw.sentTokens);
+                System.arraycopy(sentTags, 0, posTags, sw.firstTokenIdx, sw.tokenCount);
+            } catch (Exception e) {
+                LOG.warnf("POS tagging failed for sentence at token %d (%d tokens): %s",
+                        sw.firstTokenIdx, sw.tokenCount, e.getMessage());
             }
-        } else {
-            LOG.debug("Lemmatizer not available, returning raw tokens");
         }
-        // Fallback: raw tokens as lemmas
-        return Arrays.copyOf(tokens, tokens.length);
+
+        if (lemmatizer != null && sentTags != null) {
+            try {
+                String[] sentLemmas = lemmatizer.lemmatize(sw.sentTokens, sentTags);
+                System.arraycopy(sentLemmas, 0, lemmas, sw.firstTokenIdx, sw.tokenCount);
+            } catch (Exception e) {
+                LOG.warnf("Lemmatization failed for sentence at token %d: %s",
+                        sw.firstTokenIdx, e.getMessage());
+            }
+        }
     }
 }
