@@ -127,13 +127,94 @@ public class NlpPreprocessor {
             return NlpResult.empty();
         }
 
-        // Step 1: Tokenization
-        String[] tokens = tokenizer.tokenize(text);
-        Span[] tokenSpans = tokenizer.tokenizePos(text);
+        // Step 1: Tokenization — OpenNLP can return null entries or out-of-bounds spans
+        // with messy text (parsed PDFs, HTML). Sanitize both arrays.
+        String[] rawTokens = tokenizer.tokenize(text);
+        Span[] rawTokenSpans = tokenizer.tokenizePos(text);
+        int textLen = text.length();
 
-        // Step 2: Sentence detection
-        String[] sentences = sentenceDetector.sentDetect(text);
-        Span[] sentenceSpans = sentenceDetector.sentPosDetect(text);
+        // Build sanitized parallel arrays: drop null spans and out-of-bounds offsets
+        int validCount = 0;
+        for (int i = 0; i < rawTokenSpans.length && i < rawTokens.length; i++) {
+            Span s = rawTokenSpans[i];
+            if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                validCount++;
+            }
+        }
+        String[] tokens;
+        Span[] tokenSpans;
+        if (validCount == rawTokens.length && validCount == rawTokenSpans.length) {
+            tokens = rawTokens;
+            tokenSpans = rawTokenSpans;
+        } else {
+            LOG.warnf("OpenNLP tokenizer returned %d/%d valid spans for text of length %d — sanitizing",
+                    validCount, rawTokenSpans.length, textLen);
+            tokens = new String[validCount];
+            tokenSpans = new Span[validCount];
+            int idx = 0;
+            for (int i = 0; i < rawTokenSpans.length && i < rawTokens.length; i++) {
+                Span s = rawTokenSpans[i];
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    tokens[idx] = rawTokens[i];
+                    tokenSpans[idx] = s;
+                    idx++;
+                }
+            }
+        }
+
+        // Step 2: Sentence detection — call sentPosDetect() first (returns Span[]),
+        // then derive sentence strings from spans. Do NOT call sentDetect() — it internally
+        // calls Span.spansToStrings() which NPEs on null spans from messy text.
+        Span[] rawSentenceSpans;
+        String[] rawSentences;
+        try {
+            rawSentenceSpans = sentenceDetector.sentPosDetect(text);
+            // Derive sentence strings from spans manually (avoids Span.spansToStrings NPE)
+            rawSentences = new String[rawSentenceSpans.length];
+            for (int i = 0; i < rawSentenceSpans.length; i++) {
+                if (rawSentenceSpans[i] != null
+                        && rawSentenceSpans[i].getStart() >= 0
+                        && rawSentenceSpans[i].getEnd() <= textLen) {
+                    rawSentences[i] = text.substring(rawSentenceSpans[i].getStart(), rawSentenceSpans[i].getEnd());
+                } else {
+                    rawSentences[i] = "";
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnf("OpenNLP sentence detection failed for text of length %d: %s — falling back to single sentence",
+                    textLen, e.getMessage());
+            rawSentences = new String[]{text};
+            rawSentenceSpans = new Span[]{new Span(0, textLen)};
+        }
+
+        // Sanitize sentence spans
+        int validSentences = 0;
+        for (int i = 0; i < rawSentenceSpans.length && i < rawSentences.length; i++) {
+            Span s = rawSentenceSpans[i];
+            if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                validSentences++;
+            }
+        }
+        String[] sentences;
+        Span[] sentenceSpans;
+        if (validSentences == rawSentences.length && validSentences == rawSentenceSpans.length) {
+            sentences = rawSentences;
+            sentenceSpans = rawSentenceSpans;
+        } else {
+            LOG.warnf("OpenNLP sentence detector returned %d/%d valid spans for text of length %d — sanitizing",
+                    validSentences, rawSentenceSpans.length, textLen);
+            sentences = new String[validSentences];
+            sentenceSpans = new Span[validSentences];
+            int idx = 0;
+            for (int i = 0; i < rawSentenceSpans.length && i < rawSentences.length; i++) {
+                Span s = rawSentenceSpans[i];
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    sentences[idx] = rawSentences[i];
+                    sentenceSpans[idx] = s;
+                    idx++;
+                }
+            }
+        }
 
         // Step 3 + 4: POS tagging + lemmatization PER SENTENCE (not whole document).
         // POS tagger uses Viterbi beam search — O(n × k²) per sequence.
@@ -245,16 +326,23 @@ public class NlpPreprocessor {
             return;
         }
 
-        // Build sentence work items: map tokens to sentences by character offsets
+        // Build sentence work items: map tokens to sentences by character offsets.
+        // Guard against OpenNLP returning inconsistent token/sentence spans.
         SentenceWork[] work = new SentenceWork[sentenceSpans.length];
         int tokenIdx = 0;
         for (int s = 0; s < sentenceSpans.length; s++) {
             int sentEnd = sentenceSpans[s].getEnd();
             int firstToken = tokenIdx;
-            while (tokenIdx < tokenSpans.length && tokenSpans[tokenIdx].getStart() < sentEnd) {
+            while (tokenIdx < tokenSpans.length) {
+                Span ts = tokenSpans[tokenIdx];
+                if (ts == null || ts.getStart() >= sentEnd) break;
                 tokenIdx++;
             }
             int tokenCount = tokenIdx - firstToken;
+            // Clamp to actual array bounds to prevent arraycopy overflow
+            if (firstToken + tokenCount > tokens.length) {
+                tokenCount = Math.max(0, tokens.length - firstToken);
+            }
             if (tokenCount == 0) {
                 work[s] = new SentenceWork(firstToken, 0, new String[0]);
                 continue;
