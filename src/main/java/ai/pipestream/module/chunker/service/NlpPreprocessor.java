@@ -417,7 +417,7 @@ public class NlpPreprocessor {
                 sentTags = tagger.tag(sw.sentTokens);
                 System.arraycopy(sentTags, 0, posTags, sw.firstTokenIdx, sw.tokenCount);
             } catch (Exception e) {
-                LOG.warnf("POS tagging failed for sentence at token %d (%d tokens): %s",
+                LOG.debugf("POS tagging failed for sentence at token %d (%d tokens): %s",
                         sw.firstTokenIdx, sw.tokenCount, e.getMessage());
             }
         }
@@ -427,7 +427,7 @@ public class NlpPreprocessor {
                 String[] sentLemmas = lemmatizer.lemmatize(sw.sentTokens, sentTags);
                 System.arraycopy(sentLemmas, 0, lemmas, sw.firstTokenIdx, sw.tokenCount);
             } catch (Exception e) {
-                LOG.warnf("Lemmatization failed for sentence at token %d: %s",
+                LOG.debugf("Lemmatization failed for sentence at token %d: %s",
                         sw.firstTokenIdx, e.getMessage());
             }
         }
