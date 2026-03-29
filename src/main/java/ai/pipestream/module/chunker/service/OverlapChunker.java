@@ -452,8 +452,31 @@ public class OverlapChunker {
             tokenSpans = nlpResult.tokenSpans();
             LOG.debugf("Using pre-computed NLP tokens (%d tokens) for document ID: %s", tokens.length, documentId);
         } else {
-            tokens = tokenizer.tokenize(textToProcess);
+            // Use tokenizePos first, derive strings manually — tokenize() NPEs on null spans
             tokenSpans = tokenizer.tokenizePos(textToProcess);
+            int tLen = textToProcess.length();
+            int tValid = 0;
+            for (opennlp.tools.util.Span s : tokenSpans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= tLen && s.getStart() < s.getEnd()) tValid++;
+            }
+            if (tValid < tokenSpans.length) {
+                opennlp.tools.util.Span[] cleanSpans = new opennlp.tools.util.Span[tValid];
+                tokens = new String[tValid];
+                int ti = 0;
+                for (opennlp.tools.util.Span s : tokenSpans) {
+                    if (s != null && s.getStart() >= 0 && s.getEnd() <= tLen && s.getStart() < s.getEnd()) {
+                        cleanSpans[ti] = s;
+                        tokens[ti] = textToProcess.substring(s.getStart(), s.getEnd());
+                        ti++;
+                    }
+                }
+                tokenSpans = cleanSpans;
+            } else {
+                tokens = new String[tokenSpans.length];
+                for (int ti = 0; ti < tokenSpans.length; ti++) {
+                    tokens[ti] = textToProcess.substring(tokenSpans[ti].getStart(), tokenSpans[ti].getEnd());
+                }
+            }
         }
         
         if (tokens.length == 0) {

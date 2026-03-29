@@ -127,39 +127,33 @@ public class NlpPreprocessor {
             return NlpResult.empty();
         }
 
-        // Step 1: Tokenization — OpenNLP can return null entries or out-of-bounds spans
-        // with messy text (parsed PDFs, HTML). Sanitize both arrays.
-        String[] rawTokens = tokenizer.tokenize(text);
+        // Step 1: Tokenization — call tokenizePos() FIRST (returns Span[]),
+        // then derive token strings manually. Do NOT call tokenize() — it internally
+        // calls Span.spansToStrings() which NPEs on null spans from messy text.
         Span[] rawTokenSpans = tokenizer.tokenizePos(text);
         int textLen = text.length();
 
-        // Build sanitized parallel arrays: drop null spans and out-of-bounds offsets
+        // Build sanitized parallel arrays: drop null spans and out-of-bounds offsets,
+        // derive token strings from spans manually
         int validCount = 0;
-        for (int i = 0; i < rawTokenSpans.length && i < rawTokens.length; i++) {
-            Span s = rawTokenSpans[i];
+        for (Span s : rawTokenSpans) {
             if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
                 validCount++;
             }
         }
-        String[] tokens;
-        Span[] tokenSpans;
-        if (validCount == rawTokens.length && validCount == rawTokenSpans.length) {
-            tokens = rawTokens;
-            tokenSpans = rawTokenSpans;
-        } else {
-            LOG.warnf("OpenNLP tokenizer returned %d/%d valid spans for text of length %d — sanitizing",
-                    validCount, rawTokenSpans.length, textLen);
-            tokens = new String[validCount];
-            tokenSpans = new Span[validCount];
-            int idx = 0;
-            for (int i = 0; i < rawTokenSpans.length && i < rawTokens.length; i++) {
-                Span s = rawTokenSpans[i];
-                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
-                    tokens[idx] = rawTokens[i];
-                    tokenSpans[idx] = s;
-                    idx++;
-                }
+        String[] tokens = new String[validCount];
+        Span[] tokenSpans = new Span[validCount];
+        int idx = 0;
+        for (Span s : rawTokenSpans) {
+            if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                tokens[idx] = text.substring(s.getStart(), s.getEnd());
+                tokenSpans[idx] = s;
+                idx++;
             }
+        }
+        if (validCount < rawTokenSpans.length) {
+            LOG.warnf("OpenNLP tokenizer returned %d/%d valid spans for text of length %d — sanitized",
+                    validCount, rawTokenSpans.length, textLen);
         }
 
         // Step 2: Sentence detection — call sentPosDetect() first (returns Span[]),
@@ -205,13 +199,13 @@ public class NlpPreprocessor {
                     validSentences, rawSentenceSpans.length, textLen);
             sentences = new String[validSentences];
             sentenceSpans = new Span[validSentences];
-            int idx = 0;
+            int si = 0;
             for (int i = 0; i < rawSentenceSpans.length && i < rawSentences.length; i++) {
                 Span s = rawSentenceSpans[i];
                 if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
-                    sentences[idx] = rawSentences[i];
-                    sentenceSpans[idx] = s;
-                    idx++;
+                    sentences[si] = rawSentences[i];
+                    sentenceSpans[si] = s;
+                    si++;
                 }
             }
         }

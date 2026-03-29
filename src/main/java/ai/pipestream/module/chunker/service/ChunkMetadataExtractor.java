@@ -62,7 +62,7 @@ public class ChunkMetadataExtractor {
         int sentenceCount = sentences.length;
         metadataMap.put("sentence_count", Value.newBuilder().setNumberValue(sentenceCount).build());
 
-        String[] tokens = tokenizer.tokenize(chunkText);
+        String[] tokens = safeTokenize(chunkText);
         int wordCount = tokens.length;
         metadataMap.put("word_count", Value.newBuilder().setNumberValue(wordCount).build());
 
@@ -129,7 +129,7 @@ public class ChunkMetadataExtractor {
 
         int characterCount = chunkText.length();
         String[] sentences = safeSentDetect(chunkText);
-        String[] tokens = tokenizer.tokenize(chunkText);
+        String[] tokens = safeTokenize(chunkText);
         int wordCount = tokens.length;
         int sentenceCount = sentences.length;
 
@@ -192,7 +192,7 @@ public class ChunkMetadataExtractor {
 
         int characterCount = fullText.length();
         String[] sentences = safeSentDetect(fullText);
-        String[] tokens = tokenizer.tokenize(fullText);
+        String[] tokens = safeTokenize(fullText);
         int wordCount = tokens.length;
         int sentenceCount = sentences.length;
 
@@ -361,6 +361,33 @@ public class ChunkMetadataExtractor {
      * @param sentenceCount The number of sentences in the chunk
      * @return A score between 0.0 and 1.0
      */
+    /**
+     * Safely tokenize text, avoiding OpenNLP's internal NPE on null spans.
+     * tokenize() calls Span.spansToStrings() internally which NPEs on null spans.
+     */
+    private String[] safeTokenize(String text) {
+        try {
+            opennlp.tools.util.Span[] spans = tokenizer.tokenizePos(text);
+            int textLen = text.length();
+            int valid = 0;
+            for (opennlp.tools.util.Span s : spans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    valid++;
+                }
+            }
+            String[] result = new String[valid];
+            int idx = 0;
+            for (opennlp.tools.util.Span s : spans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    result[idx++] = text.substring(s.getStart(), s.getEnd());
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            return new String[]{text};
+        }
+    }
+
     /**
      * Safely detect sentences, avoiding OpenNLP's internal NPE on null spans.
      * sentDetect() calls Span.spansToStrings() internally which NPEs when the model
