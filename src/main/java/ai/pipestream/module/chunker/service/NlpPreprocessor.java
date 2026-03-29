@@ -10,7 +10,12 @@ import opennlp.tools.postag.POSModel;
 import opennlp.tools.postag.POSTagger;
 import opennlp.tools.postag.POSTaggerME;
 import opennlp.tools.sentdetect.SentenceDetector;
+import opennlp.tools.sentdetect.SentenceDetectorME;
+import opennlp.tools.sentdetect.SentenceModel;
+import opennlp.tools.tokenize.SimpleTokenizer;
 import opennlp.tools.tokenize.Tokenizer;
+import opennlp.tools.tokenize.TokenizerME;
+import opennlp.tools.tokenize.TokenizerModel;
 import opennlp.tools.util.Span;
 import org.jboss.logging.Logger;
 
@@ -48,28 +53,41 @@ public class NlpPreprocessor {
     /** Number of virtual threads for parallel sentence tagging. */
     private static final int PARALLELISM = Runtime.getRuntime().availableProcessors();
 
-    private final Tokenizer tokenizer;
-    private final SentenceDetector sentenceDetector;
-    private final Instance<POSTagger> posTaggerInstance;
+    private final TokenizerProvider tokenizerProvider;
+    private final SentenceDetectorProvider sentenceDetectorProvider;
     private final Instance<Lemmatizer> lemmatizerInstance;
     private final Instance<LanguageDetector> languageDetectorInstance;
     private final POSTaggerProvider posTaggerProvider;
 
     @Inject
     public NlpPreprocessor(
-            Tokenizer tokenizer,
-            SentenceDetector sentenceDetector,
-            Instance<POSTagger> posTaggerInstance,
+            TokenizerProvider tokenizerProvider,
+            SentenceDetectorProvider sentenceDetectorProvider,
             Instance<Lemmatizer> lemmatizerInstance,
             Instance<LanguageDetector> languageDetectorInstance,
             POSTaggerProvider posTaggerProvider) {
-        this.tokenizer = tokenizer;
-        this.sentenceDetector = sentenceDetector;
-        this.posTaggerInstance = posTaggerInstance;
+        this.tokenizerProvider = tokenizerProvider;
+        this.sentenceDetectorProvider = sentenceDetectorProvider;
         this.lemmatizerInstance = lemmatizerInstance;
         this.languageDetectorInstance = languageDetectorInstance;
         this.posTaggerProvider = posTaggerProvider;
         LOG.infof("NlpPreprocessor initialized with parallelism=%d", PARALLELISM);
+    }
+
+    /**
+     * Creates a thread-local Tokenizer instance. TokenizerME is NOT thread-safe.
+     */
+    private Tokenizer createTokenizer() {
+        TokenizerModel model = tokenizerProvider.getModel();
+        return model != null ? new TokenizerME(model) : SimpleTokenizer.INSTANCE;
+    }
+
+    /**
+     * Creates a thread-local SentenceDetector instance. SentenceDetectorME is NOT thread-safe.
+     */
+    private SentenceDetector createSentenceDetector() {
+        SentenceModel model = sentenceDetectorProvider.getModel();
+        return model != null ? new SentenceDetectorME(model) : sentenceDetectorProvider.createSentenceDetector();
     }
 
     /**
@@ -126,6 +144,12 @@ public class NlpPreprocessor {
         if (text == null || text.isBlank()) {
             return NlpResult.empty();
         }
+
+        // Create per-call instances — TokenizerME and SentenceDetectorME are NOT thread-safe.
+        // They have mutable internal state (newTokens list, sentProbs list) that corrupts
+        // under concurrent access, producing null spans and text bleeding between documents.
+        Tokenizer tokenizer = createTokenizer();
+        SentenceDetector sentenceDetector = createSentenceDetector();
 
         // Step 1: Tokenization — call tokenizePos() FIRST (returns Span[]),
         // then derive token strings manually. Do NOT call tokenize() — it internally
