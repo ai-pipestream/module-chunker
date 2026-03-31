@@ -208,7 +208,7 @@ public class OverlapChunker {
     /**
      * Create chunks using ChunkerConfig for better ID generation.
      * This is the preferred method that generates clean, semantic chunk IDs.
-     * 
+     *
      * @param document The PipeDoc to chunk
      * @param config Chunker configuration (node/step identifier is pipeStepName; opensearch-manager derives field names)
      * @param streamId Stream ID for logging
@@ -227,8 +227,42 @@ public class OverlapChunker {
             "chunker", // logPrefix
             config.preserveUrls()
         );
-        
+
         return createChunksInternal(document, options, config, streamId, pipeStepName);
+    }
+
+    /**
+     * Create chunks using ChunkerConfig with pre-computed NLP results.
+     * This avoids redundant tokenization/sentence-detection when NLP has already been
+     * run on the same text (e.g., by NlpPreprocessor in a multi-config pipeline).
+     *
+     * <p><b>IMPORTANT:</b> The NlpResult MUST have been computed on the same text that
+     * this method will chunk (i.e., after any text cleaning). The caller is responsible
+     * for cleaning text first, then passing the cleaned text to both NlpPreprocessor
+     * and this method.</p>
+     *
+     * @param document The PipeDoc to chunk
+     * @param config Chunker configuration
+     * @param streamId Stream ID for logging
+     * @param pipeStepName Pipeline step name for logging
+     * @param nlpResult Pre-computed NLP results (tokens, sentences, spans)
+     * @return ChunkingResult containing the created chunks and URL placeholder mappings
+     */
+    public ChunkingResult createChunks(PipeDoc document, ChunkerConfig config, String streamId,
+                                        String pipeStepName, NlpPreprocessor.NlpResult nlpResult) {
+        // Convert ChunkerConfig to ChunkerOptions for internal processing
+        ChunkerOptions options = new ChunkerOptions(
+            config.sourceField(),
+            config.chunkSize(),
+            config.chunkOverlap(),
+            null, // IDs generated using pipeStepName
+            pipeStepName,
+            "{step_name}_chunks", // resultSetNameTemplate
+            "chunker", // logPrefix
+            config.preserveUrls()
+        );
+
+        return createChunksInternal(document, options, config, streamId, pipeStepName, nlpResult);
     }
 
     /**
@@ -245,8 +279,8 @@ public class OverlapChunker {
     }
 
     /**
-     * Internal method that handles the actual chunking logic.
-     * 
+     * Internal method that handles the actual chunking logic (legacy path — no pre-computed NLP).
+     *
      * @param document The PipeDoc to chunk
      * @param options Chunking configuration options
      * @param config Optional ChunkerConfig for better ID generation (can be null)
@@ -255,6 +289,25 @@ public class OverlapChunker {
      * @return ChunkingResult containing the created chunks and URL placeholder mappings
      */
     private ChunkingResult createChunksInternal(PipeDoc document, ChunkerOptions options, ChunkerConfig config, String streamId, String pipeStepName) {
+        return createChunksInternal(document, options, config, streamId, pipeStepName, null);
+    }
+
+    /**
+     * Internal method that handles the actual chunking logic.
+     * When nlpResult is non-null, pre-computed tokens/sentences/spans are used instead
+     * of calling the tokenizer/sentenceDetector directly.
+     *
+     * @param document The PipeDoc to chunk
+     * @param options Chunking configuration options
+     * @param config Optional ChunkerConfig for better ID generation (can be null)
+     * @param streamId Stream ID for logging and chunk ID generation
+     * @param pipeStepName Pipeline step name for logging
+     * @param nlpResult Pre-computed NLP results, or null to use tokenizer/sentenceDetector directly
+     * @return ChunkingResult containing the created chunks and URL placeholder mappings
+     */
+    private ChunkingResult createChunksInternal(PipeDoc document, ChunkerOptions options, ChunkerConfig config,
+                                                 String streamId, String pipeStepName,
+                                                 NlpPreprocessor.NlpResult nlpResult) {
         if (document == null) {
             LOG.warnf("Input document is null. Cannot create chunks. streamId: %s, pipeStepName: %s", streamId, pipeStepName);
             return new ChunkingResult(Collections.emptyList(), Collections.emptyMap()); // Return empty result
@@ -292,8 +345,16 @@ public class OverlapChunker {
 
         if (options.preserveUrls() != null && options.preserveUrls()) {
             textToProcess = transformURLsToPlaceholders(originalText, placeholderToUrlMap, originalUrlSpans);
-            LOG.debugf("Text after URL placeholder replacement: %d characters, %d URLs replaced", 
+            LOG.debugf("Text after URL placeholder replacement: %d characters, %d URLs replaced",
                       textToProcess.length(), placeholderToUrlMap.size());
+            // URL placeholder replacement changes the text, so pre-computed NlpResult
+            // (whose offsets are based on the original text) cannot be used safely.
+            // Fall back to direct tokenization/sentence-detection for this document.
+            if (nlpResult != null && !placeholderToUrlMap.isEmpty()) {
+                LOG.debugf("URL placeholders changed text — invalidating pre-computed NlpResult for chunking (NlpResult " +
+                        "is still valid for analytics). Document ID: %s", document.getDocId());
+                nlpResult = null;
+            }
         }
 
         // Determine chunking algorithm from config
@@ -306,12 +367,12 @@ public class OverlapChunker {
 
         // Branch based on algorithm
         if (algorithm == ChunkingAlgorithm.SENTENCE) {
-            return createSentenceBasedChunks(textToProcess, placeholderToUrlMap, options, config, streamId, pipeStepName, documentId);
+            return createSentenceBasedChunks(textToProcess, placeholderToUrlMap, options, config, streamId, pipeStepName, documentId, nlpResult);
         } else if (algorithm == ChunkingAlgorithm.CHARACTER) {
             return createCharacterBasedChunks(textToProcess, placeholderToUrlMap, options, config, streamId, pipeStepName, documentId, textFieldPath);
         } else {
             // Default to token-based chunking (TOKEN algorithm, SEMANTIC not implemented yet)
-            return createTokenBasedChunks(textToProcess, placeholderToUrlMap, options, config, streamId, pipeStepName, documentId, textFieldPath);
+            return createTokenBasedChunks(textToProcess, placeholderToUrlMap, options, config, streamId, pipeStepName, documentId, textFieldPath, nlpResult);
         }
     }
 
@@ -363,7 +424,7 @@ public class OverlapChunker {
 
     /**
      * Creates chunks using token-based algorithm with proper token counting for size and overlap.
-     * 
+     *
      * @param textToProcess Text that has been preprocessed (URL placeholders if enabled)
      * @param placeholderToUrlMap Map of URL placeholders to original URLs
      * @param options Chunking configuration options (chunkSize = token count, chunkOverlap = token count)
@@ -372,18 +433,51 @@ public class OverlapChunker {
      * @param pipeStepName Pipeline step name for logging
      * @param documentId Document ID for chunk ID generation
      * @param textFieldPath Field path being chunked (for logging)
+     * @param nlpResult Pre-computed NLP results, or null to tokenize directly
      * @return ChunkingResult containing chunks and URL placeholder mappings
      */
     private ChunkingResult createTokenBasedChunks(String textToProcess, Map<String, String> placeholderToUrlMap,
                                                   ChunkerOptions options, ChunkerConfig config, String streamId,
-                                                  String pipeStepName, String documentId, String textFieldPath) {
-        
+                                                  String pipeStepName, String documentId, String textFieldPath,
+                                                  NlpPreprocessor.NlpResult nlpResult) {
+
         LOG.debugf("Creating chunks with target token size: %d, token overlap: %d, for document ID: %s, streamId: %s, pipeStepName: %s",
                 options.chunkSize(), options.chunkOverlap(), documentId, streamId, pipeStepName);
 
-        // Tokenize the text to get both tokens and their positions
-        String[] tokens = tokenizer.tokenize(textToProcess);
-        opennlp.tools.util.Span[] tokenSpans = tokenizer.tokenizePos(textToProcess);
+        // Use pre-computed tokens/spans from NlpResult when available, otherwise tokenize directly
+        String[] tokens;
+        opennlp.tools.util.Span[] tokenSpans;
+        if (nlpResult != null && nlpResult.tokens().length > 0) {
+            tokens = nlpResult.tokens();
+            tokenSpans = nlpResult.tokenSpans();
+            LOG.debugf("Using pre-computed NLP tokens (%d tokens) for document ID: %s", tokens.length, documentId);
+        } else {
+            // Use tokenizePos first, derive strings manually — tokenize() NPEs on null spans
+            tokenSpans = tokenizer.tokenizePos(textToProcess);
+            int tLen = textToProcess.length();
+            int tValid = 0;
+            for (opennlp.tools.util.Span s : tokenSpans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= tLen && s.getStart() < s.getEnd()) tValid++;
+            }
+            if (tValid < tokenSpans.length) {
+                opennlp.tools.util.Span[] cleanSpans = new opennlp.tools.util.Span[tValid];
+                tokens = new String[tValid];
+                int ti = 0;
+                for (opennlp.tools.util.Span s : tokenSpans) {
+                    if (s != null && s.getStart() >= 0 && s.getEnd() <= tLen && s.getStart() < s.getEnd()) {
+                        cleanSpans[ti] = s;
+                        tokens[ti] = textToProcess.substring(s.getStart(), s.getEnd());
+                        ti++;
+                    }
+                }
+                tokenSpans = cleanSpans;
+            } else {
+                tokens = new String[tokenSpans.length];
+                for (int ti = 0; ti < tokenSpans.length; ti++) {
+                    tokens[ti] = textToProcess.substring(tokenSpans[ti].getStart(), tokenSpans[ti].getEnd());
+                }
+            }
+        }
         
         if (tokens.length == 0) {
             LOG.debugf("No tokens found in text. Returning empty chunks. streamId: %s, pipeStepName: %s", streamId, pipeStepName);
@@ -564,7 +658,7 @@ public class OverlapChunker {
     /**
      * Creates chunks using sentence-based algorithm that respects sentence boundaries.
      * For sentence chunking, chunkSize represents the number of sentences per chunk.
-     * 
+     *
      * @param textToProcess Text that has been preprocessed (URL placeholders if enabled)
      * @param placeholderToUrlMap Map of URL placeholders to original URLs
      * @param options Chunking configuration options (chunkSize = number of sentences, chunkOverlap = number of sentences)
@@ -572,18 +666,53 @@ public class OverlapChunker {
      * @param streamId Stream ID for logging and chunk IDs
      * @param pipeStepName Pipeline step name for logging
      * @param documentId Document ID for chunk ID generation
+     * @param nlpResult Pre-computed NLP results, or null to sentence-detect directly
      * @return ChunkingResult containing chunks and URL placeholder mappings
      */
     private ChunkingResult createSentenceBasedChunks(String textToProcess, Map<String, String> placeholderToUrlMap,
                                                      ChunkerOptions options, ChunkerConfig config, String streamId,
-                                                     String pipeStepName, String documentId) {
-        
+                                                     String pipeStepName, String documentId,
+                                                     NlpPreprocessor.NlpResult nlpResult) {
+
         LOG.debugf("Creating sentence-based chunks with target sentences per chunk: %d, sentence overlap: %d, for document ID: %s, streamId: %s, pipeStepName: %s",
                 options.chunkSize(), options.chunkOverlap(), documentId, streamId, pipeStepName);
 
-        // Detect sentences and their positions
-        String[] sentences = sentenceDetector.sentDetect(textToProcess);
-        opennlp.tools.util.Span[] sentenceSpans = sentenceDetector.sentPosDetect(textToProcess);
+        // Use pre-computed sentences/spans from NlpResult when available, otherwise detect directly
+        String[] sentences;
+        opennlp.tools.util.Span[] sentenceSpans;
+        if (nlpResult != null && nlpResult.sentences().length > 0) {
+            sentences = nlpResult.sentences();
+            sentenceSpans = nlpResult.sentenceSpans();
+            LOG.debugf("Using pre-computed NLP sentences (%d sentences) for document ID: %s", sentences.length, documentId);
+        } else {
+            // Use sentPosDetect first, derive strings manually — sentDetect() NPEs on null spans
+            sentenceSpans = sentenceDetector.sentPosDetect(textToProcess);
+            int textLen = textToProcess.length();
+            int valid = 0;
+            for (opennlp.tools.util.Span s : sentenceSpans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) valid++;
+            }
+            if (valid < sentenceSpans.length) {
+                // Sanitize: filter out null/invalid spans
+                opennlp.tools.util.Span[] cleanSpans = new opennlp.tools.util.Span[valid];
+                String[] cleanSentences = new String[valid];
+                int idx = 0;
+                for (opennlp.tools.util.Span s : sentenceSpans) {
+                    if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                        cleanSpans[idx] = s;
+                        cleanSentences[idx] = textToProcess.substring(s.getStart(), s.getEnd());
+                        idx++;
+                    }
+                }
+                sentenceSpans = cleanSpans;
+                sentences = cleanSentences;
+            } else {
+                sentences = new String[sentenceSpans.length];
+                for (int i = 0; i < sentenceSpans.length; i++) {
+                    sentences[i] = textToProcess.substring(sentenceSpans[i].getStart(), sentenceSpans[i].getEnd());
+                }
+            }
+        }
         
         if (sentences.length == 0) {
             LOG.debugf("No sentences found in text. Returning empty chunks. streamId: %s, pipeStepName: %s", streamId, pipeStepName);

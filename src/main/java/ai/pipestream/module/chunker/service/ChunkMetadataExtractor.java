@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.text.DecimalFormat;
 import java.util.*;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Extracts metadata from text chunks to provide additional context and information.
@@ -57,11 +58,11 @@ public class ChunkMetadataExtractor {
         int characterCount = chunkText.length();
         metadataMap.put("character_count", Value.newBuilder().setNumberValue(characterCount).build());
 
-        String[] sentences = sentenceDetector.sentDetect(chunkText);
+        String[] sentences = safeSentDetect(chunkText);
         int sentenceCount = sentences.length;
         metadataMap.put("sentence_count", Value.newBuilder().setNumberValue(sentenceCount).build());
 
-        String[] tokens = tokenizer.tokenize(chunkText);
+        String[] tokens = safeTokenize(chunkText);
         int wordCount = tokens.length;
         metadataMap.put("word_count", Value.newBuilder().setNumberValue(wordCount).build());
 
@@ -127,8 +128,8 @@ public class ChunkMetadataExtractor {
         }
 
         int characterCount = chunkText.length();
-        String[] sentences = sentenceDetector.sentDetect(chunkText);
-        String[] tokens = tokenizer.tokenize(chunkText);
+        String[] sentences = safeSentDetect(chunkText);
+        String[] tokens = safeTokenize(chunkText);
         int wordCount = tokens.length;
         int sentenceCount = sentences.length;
 
@@ -190,8 +191,8 @@ public class ChunkMetadataExtractor {
         }
 
         int characterCount = fullText.length();
-        String[] sentences = sentenceDetector.sentDetect(fullText);
-        String[] tokens = tokenizer.tokenize(fullText);
+        String[] sentences = safeSentDetect(fullText);
+        String[] tokens = safeTokenize(fullText);
         int wordCount = tokens.length;
         int sentenceCount = sentences.length;
 
@@ -233,6 +234,125 @@ public class ChunkMetadataExtractor {
     }
 
     /**
+     * Extracts typed DocumentAnalytics proto for a full source text, enriched with NLP data.
+     * Uses pre-computed NlpResult to populate POS/language fields without re-running NLP.
+     *
+     * @param fullText The full source text
+     * @param nlpResult Pre-computed NLP analysis results
+     * @return DocumentAnalytics proto with POS/language fields populated
+     */
+    public DocumentAnalytics extractDocumentAnalytics(String fullText, NlpPreprocessor.NlpResult nlpResult) {
+        // Start with the base analytics (word count, sentence count, etc.)
+        DocumentAnalytics base = extractDocumentAnalytics(fullText);
+
+        if (nlpResult == null || nlpResult.tokens().length == 0) {
+            return base;
+        }
+
+        // Enrich with NLP-derived fields
+        return base.toBuilder()
+                .setDetectedLanguage(nlpResult.detectedLanguage())
+                .setLanguageConfidence(nlpResult.languageConfidence())
+                .setNounDensity(nlpResult.nounDensity())
+                .setVerbDensity(nlpResult.verbDensity())
+                .setAdjectiveDensity(nlpResult.adjectiveDensity())
+                .setContentWordRatio(nlpResult.contentWordRatio())
+                .setUniqueLemmaCount(nlpResult.uniqueLemmaCount())
+                .setLexicalDensity(nlpResult.lexicalDensity())
+                .build();
+    }
+
+    /**
+     * Extracts typed ChunkAnalytics proto for a chunk, enriched with NLP POS data.
+     * Runs a lightweight NLP pass on the chunk text to compute chunk-level POS ratios.
+     *
+     * @param chunkText The text content of the chunk
+     * @param chunkNumber The position of this chunk in the sequence (0-based)
+     * @param totalChunks Total number of chunks in the document
+     * @param containsUrlPlaceholder Whether the chunk contains URL placeholders
+     * @param nlpPreprocessor NlpPreprocessor to run on the chunk text
+     * @return ChunkAnalytics proto with POS fields populated
+     */
+    /**
+     * Extracts chunk analytics by slicing the document-level NLP arrays.
+     * No NLP re-execution — just finds the token range for this chunk's character
+     * offsets and computes POS ratios from that slice. O(log n) binary search + O(k) scan.
+     */
+    public ChunkAnalytics extractChunkAnalytics(String chunkText, int chunkNumber, int totalChunks,
+                                                 boolean containsUrlPlaceholder,
+                                                 NlpPreprocessor.NlpResult docNlpResult,
+                                                 int chunkStartOffset, int chunkEndOffset) {
+        ChunkAnalytics base = extractChunkAnalytics(chunkText, chunkNumber, totalChunks, containsUrlPlaceholder);
+
+        if (docNlpResult == null || docNlpResult.tokens().length == 0 || StringUtils.isBlank(chunkText)) {
+            return base;
+        }
+
+        // Binary search for first token at or after chunkStartOffset
+        opennlp.tools.util.Span[] spans = docNlpResult.tokenSpans();
+        String[] posTags = docNlpResult.posTags();
+        String[] lemmas = docNlpResult.lemmas();
+
+        int firstToken = findFirstTokenAtOrAfter(spans, chunkStartOffset);
+        int lastToken = findLastTokenBefore(spans, chunkEndOffset);
+
+        if (firstToken < 0 || lastToken < firstToken) {
+            return base;
+        }
+
+        // Count POS tags in this chunk's token range
+        int total = lastToken - firstToken + 1;
+        int nouns = 0, verbs = 0, adjectives = 0, adverbs = 0;
+        Set<String> uniqueLemmas = new HashSet<>();
+
+        for (int i = firstToken; i <= lastToken; i++) {
+            String tag = posTags[i];
+            if ("NOUN".equals(tag) || "PROPN".equals(tag)) nouns++;
+            else if ("VERB".equals(tag) || "AUX".equals(tag)) verbs++;
+            else if ("ADJ".equals(tag)) adjectives++;
+            else if ("ADV".equals(tag)) adverbs++;
+
+            String lemma = lemmas[i];
+            if (lemma != null && !"O".equals(lemma) && !lemma.isBlank()) {
+                uniqueLemmas.add(lemma.toLowerCase());
+            }
+        }
+
+        int contentWords = nouns + verbs + adjectives + adverbs;
+
+        return base.toBuilder()
+                .setNounDensity(total > 0 ? (float) nouns / total : 0)
+                .setVerbDensity(total > 0 ? (float) verbs / total : 0)
+                .setAdjectiveDensity(total > 0 ? (float) adjectives / total : 0)
+                .setContentWordRatio(total > 0 ? (float) contentWords / total : 0)
+                .setUniqueLemmaCount(uniqueLemmas.size())
+                .setLexicalDensity(total > 0 ? (float) contentWords / total : 0)
+                .build();
+    }
+
+    /** Finds the first token whose start offset is >= targetOffset. */
+    private int findFirstTokenAtOrAfter(opennlp.tools.util.Span[] spans, int targetOffset) {
+        int lo = 0, hi = spans.length;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (spans[mid].getStart() < targetOffset) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo < spans.length ? lo : -1;
+    }
+
+    /** Finds the last token whose start offset is < targetOffset. */
+    private int findLastTokenBefore(opennlp.tools.util.Span[] spans, int targetOffset) {
+        int lo = 0, hi = spans.length;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (spans[mid].getStart() < targetOffset) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo - 1;
+    }
+
+    /**
      * Calculates a score indicating how likely the text is to be a heading.
      * Higher scores (closer to 1.0) indicate greater likelihood of being a heading.
      *
@@ -241,6 +361,63 @@ public class ChunkMetadataExtractor {
      * @param sentenceCount The number of sentences in the chunk
      * @return A score between 0.0 and 1.0
      */
+    /**
+     * Safely tokenize text, avoiding OpenNLP's internal NPE on null spans.
+     * tokenize() calls Span.spansToStrings() internally which NPEs on null spans.
+     */
+    private String[] safeTokenize(String text) {
+        try {
+            opennlp.tools.util.Span[] spans = tokenizer.tokenizePos(text);
+            int textLen = text.length();
+            int valid = 0;
+            for (opennlp.tools.util.Span s : spans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    valid++;
+                }
+            }
+            String[] result = new String[valid];
+            int idx = 0;
+            for (opennlp.tools.util.Span s : spans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    result[idx++] = text.substring(s.getStart(), s.getEnd());
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            return new String[]{text};
+        }
+    }
+
+    /**
+     * Safely detect sentences, avoiding OpenNLP's internal NPE on null spans.
+     * sentDetect() calls Span.spansToStrings() internally which NPEs when the model
+     * produces null spans (common with parsed PDFs/HTML containing funky formatting).
+     */
+    private String[] safeSentDetect(String text) {
+        try {
+            opennlp.tools.util.Span[] spans = sentenceDetector.sentPosDetect(text);
+            int textLen = text.length();
+            // Count valid spans, derive strings manually
+            int valid = 0;
+            for (opennlp.tools.util.Span s : spans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    valid++;
+                }
+            }
+            String[] result = new String[valid];
+            int idx = 0;
+            for (opennlp.tools.util.Span s : spans) {
+                if (s != null && s.getStart() >= 0 && s.getEnd() <= textLen && s.getStart() < s.getEnd()) {
+                    result[idx++] = text.substring(s.getStart(), s.getEnd());
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            // Last resort fallback — treat entire text as one sentence
+            return new String[]{text};
+        }
+    }
+
     private double calculatePotentialHeadingScore(String chunkText, String[] tokens, int sentenceCount) {
         double score = 0.0;
         if (tokens.length == 0) return 0.0;

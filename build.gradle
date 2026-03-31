@@ -69,8 +69,13 @@ dependencies {
     // Protobuf JSON utilities
     implementation 'com.google.protobuf:protobuf-java-util'
 
-    // OpenNLP for tokenization and sentence detection
-    implementation libs.opennlp.tools
+    // OpenNLP 3.0.0-M1 runtime + model artifacts
+    implementation libs.opennlp.runtime
+    implementation libs.opennlp.models.tokenizer.en
+    implementation libs.opennlp.models.sentdetect.en
+    implementation libs.opennlp.models.pos.en
+    implementation libs.opennlp.models.lemmatizer.en
+    implementation libs.opennlp.models.langdetect
 
     // Apache Commons utilities
     implementation libs.commons.lang3

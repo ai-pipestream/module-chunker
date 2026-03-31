@@ -13,44 +13,56 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Provider for OpenNLP Tokenizer.
- * This class creates and provides a singleton instance of the OpenNLP Tokenizer.
+ * Provider for OpenNLP Tokenizer model and instances.
+ * <p>
+ * TokenizerME is NOT thread-safe (mutable internal state: newTokens list).
+ * The TokenizerModel IS thread-safe. Callers needing concurrency should
+ * call {@link #getModel()} and create their own TokenizerME per thread.
  */
 @ApplicationScoped
 public class TokenizerProvider {
 
     private static final Logger LOG = Logger.getLogger(TokenizerProvider.class);
-    private static final String MODEL_PATH = "/models/en-token.bin";
+    private static final String MODEL_PATH = "opennlp-en-ud-ewt-tokens-1.3-2.5.4.bin";
+
+    private volatile TokenizerModel tokenizerModel;
 
     /**
-     * Creates a simple fallback tokenizer when the model is not available.
-     * 
-     * @return A basic Tokenizer implementation
+     * Produces a singleton Tokenizer for simple single-threaded use (e.g., REST endpoints).
+     * Do NOT share across concurrent threads — use {@link #getModel()} instead.
      */
-    private Tokenizer createFallbackTokenizer() {
+    @Produces
+    @Singleton
+    public Tokenizer createTokenizer() {
+        TokenizerModel model = getModel();
+        if (model != null) {
+            return new TokenizerME(model);
+        }
         LOG.warn("Using simple tokenizer fallback");
         return SimpleTokenizer.INSTANCE;
     }
 
     /**
-     * Produces a singleton instance of the OpenNLP Tokenizer.
-     * 
-     * @return A Tokenizer instance
+     * Returns the thread-safe TokenizerModel, or null if unavailable.
+     * Create a new {@code new TokenizerME(model)} per thread for concurrent use.
      */
-    @Produces
-    @Singleton
-    public Tokenizer createTokenizer() {
-        try (InputStream modelIn = getClass().getResourceAsStream(MODEL_PATH)) {
-            if (modelIn == null) {
-                LOG.warn("Tokenizer model not found at " + MODEL_PATH + ". Using simple tokenizer.");
-                return createFallbackTokenizer();
+    public TokenizerModel getModel() {
+        if (tokenizerModel == null) {
+            synchronized (this) {
+                if (tokenizerModel == null) {
+                    try (InputStream modelIn = Thread.currentThread().getContextClassLoader().getResourceAsStream(MODEL_PATH)) {
+                        if (modelIn == null) {
+                            LOG.warn("Tokenizer model not found at " + MODEL_PATH);
+                            return null;
+                        }
+                        tokenizerModel = new TokenizerModel(modelIn);
+                        LOG.info("Loaded OpenNLP tokenizer model");
+                    } catch (IOException e) {
+                        LOG.error("Error loading tokenizer model", e);
+                    }
+                }
             }
-
-            TokenizerModel model = new TokenizerModel(modelIn);
-            return new TokenizerME(model);
-        } catch (IOException e) {
-            LOG.error("Error loading tokenizer model", e);
-            return createFallbackTokenizer();
         }
+        return tokenizerModel;
     }
 }

@@ -13,19 +13,22 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Provider for OpenNLP SentenceDetector.
- * This class creates and provides a singleton instance of the OpenNLP SentenceDetector.
+ * Provider for OpenNLP SentenceDetector model and instances.
+ * <p>
+ * SentenceDetectorME is NOT thread-safe (mutable internal state: sentProbs list).
+ * The SentenceModel IS thread-safe. Callers needing concurrency should
+ * call {@link #getModel()} and create their own SentenceDetectorME per thread.
  */
 @ApplicationScoped
 public class SentenceDetectorProvider {
 
     private static final Logger LOG = Logger.getLogger(SentenceDetectorProvider.class);
-    private static final String MODEL_PATH = "/models/en-sent.bin";
+    private static final String MODEL_PATH = "opennlp-en-ud-ewt-sentence-1.3-2.5.4.bin";
+
+    private volatile SentenceModel sentenceModel;
 
     /**
      * Creates a simple fallback sentence detector when the model is not available.
-     * 
-     * @return A basic SentenceDetector implementation
      */
     private SentenceDetector createFallbackDetector() {
         return new SentenceDetector() {
@@ -41,7 +44,7 @@ public class SentenceDetectorProvider {
                 int start = 0;
                 for (int i = 0; i < sentences.length; i++) {
                     spans[i] = new Span(start, start + sentences[i].length());
-                    start += sentences[i].length() + 1; // +1 for the space
+                    start += sentences[i].length() + 1;
                 }
                 return spans;
             }
@@ -49,24 +52,41 @@ public class SentenceDetectorProvider {
     }
 
     /**
-     * Produces a singleton instance of the OpenNLP SentenceDetector.
-     * 
-     * @return A SentenceDetector instance
+     * Produces a singleton SentenceDetector for simple single-threaded use.
+     * Do NOT share across concurrent threads — use {@link #getModel()} instead.
      */
     @Produces
     @Singleton
     public SentenceDetector createSentenceDetector() {
-        try (InputStream modelIn = getClass().getResourceAsStream(MODEL_PATH)) {
-            if (modelIn == null) {
-                LOG.warn("Sentence detector model not found at " + MODEL_PATH + ". Using simple sentence detector.");
-                return createFallbackDetector();
-            }
-
-            SentenceModel model = new SentenceModel(modelIn);
+        SentenceModel model = getModel();
+        if (model != null) {
             return new SentenceDetectorME(model);
-        } catch (IOException e) {
-            LOG.error("Error loading sentence detector model", e);
-            return createFallbackDetector();
         }
+        LOG.warn("Using simple sentence detector fallback");
+        return createFallbackDetector();
+    }
+
+    /**
+     * Returns the thread-safe SentenceModel, or null if unavailable.
+     * Create a new {@code new SentenceDetectorME(model)} per thread for concurrent use.
+     */
+    public SentenceModel getModel() {
+        if (sentenceModel == null) {
+            synchronized (this) {
+                if (sentenceModel == null) {
+                    try (InputStream modelIn = Thread.currentThread().getContextClassLoader().getResourceAsStream(MODEL_PATH)) {
+                        if (modelIn == null) {
+                            LOG.warn("Sentence detector model not found at " + MODEL_PATH);
+                            return null;
+                        }
+                        sentenceModel = new SentenceModel(modelIn);
+                        LOG.info("Loaded OpenNLP sentence detector model");
+                    } catch (IOException e) {
+                        LOG.error("Error loading sentence detector model", e);
+                    }
+                }
+            }
+        }
+        return sentenceModel;
     }
 }
