@@ -19,8 +19,16 @@ import opennlp.tools.tokenize.TokenizerModel;
 import opennlp.tools.util.Span;
 import org.jboss.logging.Logger;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -52,6 +60,13 @@ public class NlpPreprocessor {
 
     /** Number of virtual threads for parallel sentence tagging. */
     private static final int PARALLELISM = Runtime.getRuntime().availableProcessors();
+
+    /** NLP result cache keyed by SHA-256 of text content. Avoids redundant NLP processing
+     *  when the semantic manager sends multiple chunking passes for the same document text. */
+    private final Cache<String, NlpResult> nlpCache = Caffeine.newBuilder()
+            .maximumSize(100)
+            .expireAfterWrite(Duration.ofMinutes(5))
+            .build();
 
     private final TokenizerProvider tokenizerProvider;
     private final SentenceDetectorProvider sentenceDetectorProvider;
@@ -136,6 +151,9 @@ public class NlpPreprocessor {
 
     /**
      * Runs all NLP analysis steps on the given text in a single pass.
+     * Results are cached by content hash — repeated calls with the same text
+     * skip all NLP processing. This is important for semantic chunking where
+     * the semantic manager sends multiple chunking passes for the same document.
      *
      * @param text the document text to preprocess
      * @return an NlpResult containing all cached NLP data
@@ -145,6 +163,31 @@ public class NlpPreprocessor {
             return NlpResult.empty();
         }
 
+        String cacheKey = hashText(text);
+        NlpResult cached = nlpCache.getIfPresent(cacheKey);
+        if (cached != null) {
+            LOG.debugf("NLP cache hit for text hash %s (length %d)", cacheKey.substring(0, 8), text.length());
+            return cached;
+        }
+
+        NlpResult result = preprocessUncached(text);
+        nlpCache.put(cacheKey, result);
+        LOG.debugf("NLP cache miss — cached result: %d sentences, %d tokens (hash %s, length %d)",
+                result.sentences().length, result.tokens().length, cacheKey.substring(0, 8), text.length());
+        return result;
+    }
+
+    private static String hashText(String text) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(text.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private NlpResult preprocessUncached(String text) {
         // Create per-call instances — TokenizerME and SentenceDetectorME are NOT thread-safe.
         // They have mutable internal state (newTokens list, sentProbs list) that corrupts
         // under concurrent access, producing null spans and text bleeding between documents.
