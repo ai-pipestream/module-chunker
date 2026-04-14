@@ -5,6 +5,7 @@ import ai.pipestream.data.module.v1.ProcessDataRequest;
 import ai.pipestream.data.module.v1.ProcessDataResponse;
 import ai.pipestream.data.module.v1.ProcessingOutcome;
 import ai.pipestream.data.module.v1.ServiceMetadata;
+import ai.pipestream.data.v1.ChunkAnalytics;
 import ai.pipestream.data.v1.NamedChunkerConfig;
 import ai.pipestream.data.v1.NamedEmbedderConfig;
 import ai.pipestream.data.v1.PipeDoc;
@@ -27,25 +28,29 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Pins the four PR-E production changes from the post-R1 correctness audit:
+ * Pins the four PR-E production changes from the post-R1 correctness audit,
+ * updated through the PR-K series:
  *
  * <ol>
  *   <li><b>content_hash on every chunk</b> — both paths stamp a SHA-256 hex
- *       of the sanitised chunk text into {@code SemanticChunk.metadata}
- *       under the {@code "content_hash"} key. Enables reprocessing dedup,
- *       content-addressed embedder cache keys, and byte-verification of a
- *       future OpenVINO chunker backend against this implementation.</li>
+ *       of the sanitised chunk text. Originally PR-E added it to the loose
+ *       {@code SemanticChunk.metadata} map; PR-K2 promoted it to the typed
+ *       {@code chunk_analytics.content_hash} field; <b>PR-K3 removed the
+ *       loose-map duplicate</b>. The typed proto field is now the canonical
+ *       and only home. Enables reprocessing dedup, content-addressed
+ *       embedder cache keys, and byte-verification of a future OpenVINO
+ *       chunker backend against this implementation.</li>
  *   <li><b>SourceFieldAnalytics fields 3-7</b> — {@code document_analytics},
  *       {@code total_chunks}, {@code average_chunk_size},
  *       {@code min_chunk_size}, and {@code max_chunk_size} are populated on
  *       every SFA entry instead of just {@code source_field} and
  *       {@code chunk_config_id}.</li>
- *   <li><b>Path B legacy metadata map</b> — {@code sentences_internal} chunks
- *       carry the full string-keyed metadata map (word_count, character_count,
- *       etc.) that Path A chunks already had. Before PR-E, sentence chunks
- *       had only {@code chunk_analytics} (typed proto) and an empty metadata
- *       map, silently giving downstream consumers zero data for sentence
- *       chunks read via the legacy map path.</li>
+ *   <li><b>Path B sentences_internal chunks have populated chunk_analytics</b>
+ *       — every sentence chunk carries a fully-populated
+ *       {@code ChunkAnalytics} typed proto. PR-E originally also populated
+ *       a legacy string-keyed {@code SemanticChunk.metadata} map for these
+ *       chunks; <b>PR-K3 removed the loose-map duplicate</b>. The typed
+ *       proto is the only place to read these fields now.</li>
  *   <li><b>parseNamedChunkerConfig hard-fails</b> — a malformed per-config
  *       Struct (unknown field type) now returns {@code PROCESSING_OUTCOME_FAILURE}
  *       with an "Invalid NamedChunkerConfig" message instead of silently
@@ -93,8 +98,10 @@ class ChunkerDedupGroundworkTest {
                         + "sentences_internal SPR (§21.9 union)")
                 .isNotEmpty();
 
-        // Every chunk in every SPR must have content_hash, and the hash must
-        // be a valid 64-char lowercase hex string.
+        // Every chunk in every SPR must have content_hash on the typed
+        // ChunkAnalytics proto, and the hash must be a valid 64-char
+        // lowercase hex string. PR-K3 removed the loose-map duplicate so
+        // the typed field is the only source of truth now.
         int totalChunksSeen = 0;
         for (SemanticProcessingResult spr : sprs) {
             String pathLabel = ChunkerGrpcImpl.SENTENCES_INTERNAL_CONFIG_ID.equals(spr.getChunkConfigId())
@@ -105,17 +112,22 @@ class ChunkerDedupGroundworkTest {
                 totalChunksSeen++;
                 String chunkCtx = pathLabel + " chunk_id='" + chunk.getChunkId() + "'";
 
-                Value hashVal = chunk.getMetadataMap().get("content_hash");
-                assertThat(hashVal)
-                        .as("%s: metadata must contain 'content_hash' key",
-                                chunkCtx)
-                        .isNotNull();
-
-                String hashStr = hashVal.getStringValue();
+                String hashStr = chunk.getChunkAnalytics().getContentHash();
                 assertThat(hashStr)
-                        .as("%s: content_hash must be a 64-char lowercase hex "
-                                + "SHA-256 digest", chunkCtx)
+                        .as("%s: chunk_analytics.content_hash (typed proto) "
+                                + "must be a 64-char lowercase hex SHA-256",
+                                chunkCtx)
                         .matches("^[0-9a-f]{64}$");
+
+                // PR-K3: loose-map content_hash entry must be GONE. Any
+                // future regression that re-introduces it (e.g. someone
+                // copy-pasting from the streaming impl) lights this up.
+                assertThat(chunk.getMetadataMap())
+                        .as("%s: SemanticChunk.metadata must NOT contain a "
+                                + "loose 'content_hash' key — PR-K3 removed "
+                                + "the duplicate; the typed field is canonical",
+                                chunkCtx)
+                        .doesNotContainKey("content_hash");
             }
         }
 
@@ -245,22 +257,29 @@ class ChunkerDedupGroundworkTest {
     }
 
     // =========================================================================
-    // (3) Path B legacy metadata map populated
+    // (3) Path B sentences_internal chunks have populated typed chunk_analytics
+    //
+    // PR-K3 inverted this test: pre-PR-K3 it asserted that the loose metadata
+    // map was POPULATED on sentence chunks (mirroring Path A's behavior).
+    // PR-K3 removed both Path A's AND Path B's loose-map writes — the typed
+    // ChunkAnalytics proto is now the canonical and only home. This test
+    // now asserts (a) the loose map is EMPTY and (b) the typed proto carries
+    // every field that used to live in the loose map.
     // =========================================================================
 
     @Test
-    void sentencesInternalChunksShouldCarryLegacyMetadataMap() {
+    void sentencesInternalChunksShouldHaveTypedAnalyticsAndEmptyLooseMap() {
         VectorSetDirectives directives = TestDirectiveBuilder.withSingleTokenDirective("body", 500, 50);
 
         PipeDoc inputDoc = PipeDoc.newBuilder()
-                .setDocId("path-b-metadata-test-" + UUID.randomUUID())
+                .setDocId("path-b-typed-analytics-" + UUID.randomUUID())
                 .setSearchMetadata(SearchMetadata.newBuilder()
                         .setBody(BODY_TEXT)
                         .setVectorSetDirectives(directives)
                         .build())
                 .build();
 
-        ProcessDataResponse response = runProcessData(inputDoc, "path-b-metadata");
+        ProcessDataResponse response = runProcessData(inputDoc, "path-b-typed");
 
         SemanticProcessingResult sentencesSpr = response.getOutputDoc()
                 .getSearchMetadata().getSemanticResultsList().stream()
@@ -273,59 +292,57 @@ class ChunkerDedupGroundworkTest {
                 .as("sentences_internal SPR must have at least one chunk")
                 .isNotEmpty();
 
-        // Every sentence chunk must carry the legacy string-keyed metadata
-        // map fields that Path A already populated — word_count, character_count,
-        // sentence_count, is_first_chunk, is_last_chunk, relative_position,
-        // contains_urlplaceholder, etc. Plus content_hash from change (1).
         for (SemanticChunk chunk : sentencesSpr.getChunksList()) {
             String ctx = "sentences_internal chunk_id='" + chunk.getChunkId() + "'";
-            var metadata = chunk.getMetadataMap();
 
-            assertThat(metadata)
-                    .as("%s: metadata map must NOT be empty — Path B must "
-                            + "populate extractAllMetadata just like Path A",
+            // PR-K3: loose metadata map must be EMPTY for chunks emitted by
+            // the chunker. Future caller-injected metadata can land here as
+            // an extension point, but the chunker itself writes nothing.
+            assertThat(chunk.getMetadataMap())
+                    .as("%s: SemanticChunk.metadata must be EMPTY — PR-K3 "
+                            + "removed all loose-map writes from the chunker. "
+                            + "Any non-empty entries are a regression where "
+                            + "someone is re-introducing the duplication.",
                             ctx)
-                    .isNotEmpty();
+                    .isEmpty();
 
-            assertThat(metadata)
-                    .as("%s: metadata map must contain 'word_count'", ctx)
-                    .containsKey("word_count");
+            // The typed ChunkAnalytics proto must carry every field that
+            // used to live in the loose map. Spot-check the most important
+            // ones — the rest are pinned by ChunkerStepInvariantsTest's
+            // post-chunker invariant check.
+            assertThat(chunk.hasChunkAnalytics())
+                    .as("%s: chunk_analytics must be populated (§4.1)", ctx)
+                    .isTrue();
 
-            assertThat(metadata)
-                    .as("%s: metadata map must contain 'character_count'", ctx)
-                    .containsKey("character_count");
+            ChunkAnalytics analytics = chunk.getChunkAnalytics();
 
-            assertThat(metadata)
-                    .as("%s: metadata map must contain 'sentence_count'", ctx)
-                    .containsKey("sentence_count");
+            assertThat(analytics.getWordCount())
+                    .as("%s: chunk_analytics.word_count must be > 0 for a "
+                            + "non-empty sentence", ctx)
+                    .isGreaterThan(0);
 
-            assertThat(metadata)
-                    .as("%s: metadata map must contain 'is_first_chunk'", ctx)
-                    .containsKey("is_first_chunk");
+            assertThat(analytics.getCharacterCount())
+                    .as("%s: chunk_analytics.character_count must be > 0", ctx)
+                    .isGreaterThan(0);
 
-            assertThat(metadata)
-                    .as("%s: metadata map must contain 'is_last_chunk'", ctx)
-                    .containsKey("is_last_chunk");
+            assertThat(analytics.getSentenceCount())
+                    .as("%s: chunk_analytics.sentence_count must be > 0", ctx)
+                    .isGreaterThan(0);
 
-            assertThat(metadata)
-                    .as("%s: metadata map must contain 'relative_position'", ctx)
-                    .containsKey("relative_position");
-
-            assertThat(metadata)
-                    .as("%s: metadata map must contain 'contains_urlplaceholder'", ctx)
-                    .containsKey("contains_urlplaceholder");
-
-            assertThat(metadata.get("contains_urlplaceholder").getBoolValue())
-                    .as("%s: contains_urlplaceholder is always false on Path B "
-                            + "(sentence chunks bypass the URL substitute/restore "
-                            + "pipeline — they walk raw NLP spans)", ctx)
+            // Path B never runs URL substitution, so contains_url_placeholder
+            // must always be false on sentence chunks.
+            assertThat(analytics.getContainsUrlPlaceholder())
+                    .as("%s: chunk_analytics.contains_url_placeholder must be "
+                            + "false on Path B — sentence chunks bypass the "
+                            + "URL substitute/restore pipeline (they walk raw "
+                            + "NLP spans)", ctx)
                     .isFalse();
 
-            // Sanity-check the word_count is non-zero for non-trivial sentences.
-            double wordCount = metadata.get("word_count").getNumberValue();
-            assertThat(wordCount)
-                    .as("%s: word_count must be > 0 for a non-empty sentence", ctx)
-                    .isGreaterThan(0);
+            // PR-K2 added content_hash to the typed proto.
+            assertThat(analytics.getContentHash())
+                    .as("%s: chunk_analytics.content_hash must be a 64-char "
+                            + "lowercase hex SHA-256", ctx)
+                    .matches("^[0-9a-f]{64}$");
         }
     }
 
@@ -411,6 +428,19 @@ class ChunkerDedupGroundworkTest {
     // =========================================================================
 
     private ProcessDataResponse runProcessData(PipeDoc doc, String streamIdPrefix) {
+        // PR-K3: disable the chunk cache so each test run computes from
+        // scratch. The cache key is (sourceText, chunkerConfigId), and
+        // BODY_TEXT is a constant — without this, an entry written by an
+        // earlier test run (or an earlier branch's code) shadows the
+        // current code path's output. Cache hits would skip the new
+        // metadata-map-empty behavior and surface as confusing failures
+        // that look like the production code is still writing the loose
+        // map when in fact it isn't.
+        Struct cacheDisabledConfig = Struct.newBuilder()
+                .putFields("cache_enabled",
+                        com.google.protobuf.Value.newBuilder().setBoolValue(false).build())
+                .build();
+
         ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(doc)
                 .setMetadata(ServiceMetadata.newBuilder()
@@ -420,7 +450,7 @@ class ChunkerDedupGroundworkTest {
                         .setCurrentHopNumber(1)
                         .build())
                 .setConfig(ProcessConfiguration.newBuilder()
-                        .setJsonConfig(Struct.getDefaultInstance())
+                        .setJsonConfig(cacheDisabledConfig)
                         .build())
                 .build();
 
@@ -434,11 +464,13 @@ class ChunkerDedupGroundworkTest {
     }
 
     private static List<String> extractContentHashes(ProcessDataResponse response) {
+        // PR-K3: read from the typed chunk_analytics.content_hash field.
+        // The loose-map "content_hash" entry was removed from the chunker
+        // output in PR-K3.
         return response.getOutputDoc().getSearchMetadata().getSemanticResultsList().stream()
                 .flatMap(spr -> spr.getChunksList().stream())
-                .map(chunk -> chunk.getMetadataMap().get("content_hash"))
-                .filter(v -> v != null)
-                .map(Value::getStringValue)
+                .map(chunk -> chunk.getChunkAnalytics().getContentHash())
+                .filter(s -> !s.isEmpty())
                 .sorted()
                 .toList();
     }
