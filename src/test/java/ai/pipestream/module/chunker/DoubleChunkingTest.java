@@ -155,7 +155,11 @@ public class DoubleChunkingTest {
     }
 
     private void saveDoubleChunkedDocuments(List<PipeDoc> docs) throws IOException {
-        Path outputDir = Paths.get("src/test/resources/double_chunked_pipedocs").toAbsolutePath();
+        // Write debug snapshots under build/tmp so they don't pollute git status.
+        // The committed fixtures under src/test/resources/double_chunked_pipedocs/ are
+        // historical inputs for InspectDoubleChunkedData and are not regenerated here.
+        Path outputDir = Paths.get(System.getProperty("user.dir"), "build", "tmp", "double_chunked_pipedocs")
+                .toAbsolutePath();
         Files.createDirectories(outputDir);
 
         for (int i = 0; i < docs.size(); i++) {
@@ -163,7 +167,7 @@ public class DoubleChunkingTest {
             Path outputFile = outputDir.resolve(String.format("double_chunked_%03d.pb", i + 1));
             Files.write(outputFile, doc.toByteArray());
         }
-        log.info("Saved {} double-chunked documents to {}", docs.size(), outputDir);
+        log.info("Saved {} double-chunked debug snapshots to {}", docs.size(), outputDir);
     }
 
     private void verifyDoubleChunkingStructure(List<PipeDoc> docs) {

@@ -54,12 +54,12 @@ public class QuickDoubleChunkTest {
         VectorSetDirectives secondDirectives = TestDirectiveBuilder.withSingleTokenDirective("body", 50, 10);
         PipeDoc doubleChunked = chunk(firstChunked, secondDirectives);
 
-        // Save result
-        Path outputDir = Paths.get("modules/chunker/src/test/resources/double_chunked_pipedocs");
+        // Save debug snapshot under build/tmp so it doesn't pollute git status.
+        Path outputDir = Paths.get(System.getProperty("user.dir"), "build", "tmp", "double_chunked_pipedocs");
         Files.createDirectories(outputDir);
         Files.write(outputDir.resolve("quick_double_001.pb"), doubleChunked.toByteArray());
 
-        log.info("Created double-chunked test data");
+        log.info("Created double-chunked test data at {}", outputDir);
     }
 
     private PipeDoc chunk(PipeDoc doc, VectorSetDirectives directives) {
