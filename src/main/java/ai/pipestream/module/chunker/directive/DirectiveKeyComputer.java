@@ -27,6 +27,18 @@ import java.util.stream.Collectors;
  * insertion order has no effect on the key — two directives with the same
  * configs in different order produce the same key.
  *
+ * <p><b>Naming constraint:</b> {@code source_label}, {@code cel_selector},
+ * and every config id must not contain the reserved delimiter characters
+ * {@code |} or {@code ,}. The spec does not define escaping — the key
+ * reduces to a concatenation with deterministic delimiters, so two distinct
+ * directives with unusual characters could theoretically collide (for example,
+ * a {@code source_label} of {@code "a|b"} is indistinguishable from a
+ * {@code source_label} of {@code "a"} with a {@code cel_selector} starting
+ * with {@code "b|"}). The project's naming conventions for these fields —
+ * alphanumeric, underscore, hyphen, dot — satisfy the non-collision invariant.
+ * If future usage relaxes those conventions, this helper needs a proper
+ * escaping pass.
+ *
  * <p>{@code sha256b64url} means: SHA-256 hash of the UTF-8 bytes of the
  * concatenated string, then base64url-encoded (URL-safe alphabet, no {@code =}
  * padding). This produces a 43-character string.

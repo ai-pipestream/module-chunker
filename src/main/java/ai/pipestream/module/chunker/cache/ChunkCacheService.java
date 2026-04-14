@@ -4,6 +4,8 @@ import ai.pipestream.data.v1.SemanticChunk;
 import ai.pipestream.data.v1.SemanticProcessingResult;
 import ai.pipestream.module.chunker.directive.DirectiveKeyComputer;
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.redis.datasource.ReactiveRedisDataSource;
 import io.quarkus.redis.datasource.value.ReactiveValueCommands;
 import io.smallrye.mutiny.Uni;
@@ -14,6 +16,7 @@ import org.jboss.logging.Logger;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Quarkus CDI bean that wraps a Redis cache for {@code List<SemanticChunk>} results
@@ -64,15 +67,47 @@ public class ChunkCacheService {
     private static final Logger LOG = Logger.getLogger(ChunkCacheService.class);
     private static final String KEY_PREFIX = "chunk:";
 
+    /** Minimum interval between duplicate WARN logs on the same error path (per DESIGN.md §9.3). */
+    static final long WARN_INTERVAL_MS = 60_000L;
+
     @Inject
     ReactiveRedisDataSource redis;
 
+    @Inject
+    MeterRegistry meterRegistry;
+
     private ReactiveValueCommands<String, byte[]> commands;
+
+    /** Counter incremented on every Redis failure (read or write) per DESIGN.md §9.3. */
+    private Counter errorCounter;
+
+    /** Timestamp of the last GET-error WARN log, used to rate-limit to 1/min per §9.3. */
+    private final AtomicLong lastGetWarnMs = new AtomicLong(0L);
+
+    /** Timestamp of the last PUT-error WARN log, used to rate-limit to 1/min per §9.3. */
+    private final AtomicLong lastPutWarnMs = new AtomicLong(0L);
 
     @PostConstruct
     void init() {
         commands = redis.value(byte[].class);
+        errorCounter = Counter.builder("chunker.cache.errors")
+                .description("Number of Redis chunk cache GET/PUT failures recovered as compute-through")
+                .register(meterRegistry);
         LOG.debug("ChunkCacheService initialized with ReactiveRedisDataSource");
+    }
+
+    /**
+     * Returns true if the WARN log for this error path should fire now, false if it
+     * should be rate-limited. Uses a CAS on the last-log timestamp so two concurrent
+     * failures cannot both slip through.
+     */
+    private static boolean shouldWarn(AtomicLong lastWarnMs) {
+        long now = System.currentTimeMillis();
+        long last = lastWarnMs.get();
+        if (now - last < WARN_INTERVAL_MS) {
+            return false;
+        }
+        return lastWarnMs.compareAndSet(last, now);
     }
 
     /**
@@ -102,8 +137,11 @@ public class ChunkCacheService {
                     }
                 })
                 .onFailure().recoverWithItem(failure -> {
-                    LOG.warnf("Chunk cache GET error for key=%s, treating as miss: %s",
-                            key, failure.getMessage());
+                    errorCounter.increment();
+                    if (shouldWarn(lastGetWarnMs)) {
+                        LOG.warnf("Chunk cache GET error (rate-limited, 1/min) key=%s type=%s: %s",
+                                key, failure.getClass().getSimpleName(), failure.getMessage());
+                    }
                     return Collections.emptyList();
                 });
     }
@@ -143,8 +181,11 @@ public class ChunkCacheService {
                         key, chunks.size(), ttlSeconds))
                 .replaceWithVoid()
                 .onFailure().recoverWithUni(failure -> {
-                    LOG.warnf("Chunk cache PUT error for key=%s, skipping write: %s",
-                            key, failure.getMessage());
+                    errorCounter.increment();
+                    if (shouldWarn(lastPutWarnMs)) {
+                        LOG.warnf("Chunk cache PUT error (rate-limited, 1/min) key=%s type=%s: %s",
+                                key, failure.getClass().getSimpleName(), failure.getMessage());
+                    }
                     return Uni.createFrom().voidItem();
                 });
     }

@@ -4,6 +4,8 @@ import ai.pipestream.data.v1.ChunkEmbedding;
 import ai.pipestream.data.v1.SemanticChunk;
 import ai.pipestream.data.v1.SemanticProcessingResult;
 import ai.pipestream.module.chunker.directive.DirectiveKeyComputer;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.quarkus.redis.datasource.ReactiveRedisDataSource;
 import io.quarkus.redis.datasource.value.ReactiveValueCommands;
 import io.smallrye.mutiny.Uni;
@@ -16,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -38,7 +41,14 @@ import static org.mockito.Mockito.when;
  *   <li>get on unknown key returns empty list</li>
  *   <li>put with {@code isRtbfSuppressed=true} is a no-op (§21.7)</li>
  *   <li>10-chunk list round-trips with byte-identical content</li>
+ *   <li>Redis error recovery on both GET and PUT paths (§9.3)</li>
+ *   <li>Corrupt / malformed bytes in cache are caught and treated as miss (§9.4)</li>
+ *   <li>Cache key format verification</li>
  * </ul>
+ *
+ * <p>A real {@link SimpleMeterRegistry} is wired for the {@code chunker.cache.errors}
+ * counter so the service's {@code @PostConstruct} counter registration succeeds
+ * without starting a full Quarkus container.
  */
 @SuppressWarnings("unchecked")
 class ChunkCacheServiceTest {
@@ -48,6 +58,7 @@ class ChunkCacheServiceTest {
 
     private ReactiveRedisDataSource redisMock;
     private ReactiveValueCommands<String, byte[]> commandsMock;
+    private MeterRegistry meterRegistry;
     private ChunkCacheService service;
 
     // In-memory store to simulate Redis SET/GET behaviour
@@ -80,9 +91,13 @@ class ChunkCacheServiceTest {
                     return Uni.createFrom().item(bytes);
                 });
 
+        // A real in-memory MeterRegistry for the chunker.cache.errors counter.
+        meterRegistry = new SimpleMeterRegistry();
+
         // Construct and initialise the service without CDI
         service = new ChunkCacheService();
         injectField(service, "redis", redisMock);
+        injectField(service, "meterRegistry", meterRegistry);
         service.init(); // @PostConstruct
     }
 
@@ -245,11 +260,50 @@ class ChunkCacheServiceTest {
 
         List<SemanticChunk> chunks = buildChunks(1, "error-chunk");
 
-        // Must not throw — errors are swallowed per §9.3
-        service.put("some text", CHUNKER_CONFIG_ID, chunks, TTL, false).await().indefinitely();
+        // The assertion IS the "no throw" — Mutiny's .await().indefinitely() propagates
+        // any unhandled failure, so reaching the end of the lambda without an exception
+        // means the recovery path in put() swallowed it per §9.3.
+        assertThatCode(() ->
+                service.put("some text", CHUNKER_CONFIG_ID, chunks, TTL, false).await().indefinitely())
+                .as("put() must complete without throwing even when Redis returns an error (§9.3 compute-through)")
+                .doesNotThrowAnyException();
+    }
 
-        // no assertion on return value needed — test passes if no exception is thrown
-        assertThat(true).as("put() must complete without throwing even when Redis returns an error").isTrue();
+    @Test
+    void get_corruptCachedBytes_returnsEmptyList_doesNotThrow() {
+        // §9.4 cache invariant: a cache hit must produce byte-identical output.
+        // If the bytes in the store are not a valid SemanticProcessingResult, the
+        // service catches InvalidProtocolBufferException and treats the hit as a miss.
+        String text = "some text";
+        String key = ChunkCacheService.buildKey(text, CHUNKER_CONFIG_ID);
+        store.put(key, new byte[]{1, 2, 3}); // deliberately not valid protobuf
+
+        List<SemanticChunk> result = service.get(text, CHUNKER_CONFIG_ID).await().indefinitely();
+
+        assertThat(result)
+                .as("a corrupt cache entry must be caught as InvalidProtocolBufferException and degrade to empty list (cache miss)")
+                .isEmpty();
+    }
+
+    @Test
+    void redisErrors_incrementErrorCounter() {
+        // §9.3: each Redis failure increments chunker.cache.errors. Run one GET failure
+        // and one PUT failure and assert the counter moved by exactly 2.
+        when(commandsMock.get(anyString()))
+                .thenReturn(Uni.createFrom().failure(new RuntimeException("GET fail")));
+        when(commandsMock.setex(anyString(), anyLong(), any(byte[].class)))
+                .thenReturn(Uni.createFrom().failure(new RuntimeException("PUT fail")));
+
+        double before = meterRegistry.counter("chunker.cache.errors").count();
+
+        service.get("some text", CHUNKER_CONFIG_ID).await().indefinitely();
+        service.put("some text", CHUNKER_CONFIG_ID, buildChunks(1, "err"), TTL, false).await().indefinitely();
+
+        double after = meterRegistry.counter("chunker.cache.errors").count();
+
+        assertThat(after - before)
+                .as("each Redis GET/PUT failure must increment the chunker.cache.errors counter exactly once")
+                .isEqualTo(2.0);
     }
 
     // =========================================================================

@@ -55,6 +55,7 @@ dependencies {
     implementation 'io.quarkus:quarkus-hibernate-validator'
     implementation 'io.quarkus:quarkus-cache'
     implementation 'io.quarkus:quarkus-redis-client'
+    implementation 'io.quarkus:quarkus-micrometer'
     implementation 'io.quarkus:quarkus-container-image-docker'
 
     // Service Discovery dependencies for Consul
