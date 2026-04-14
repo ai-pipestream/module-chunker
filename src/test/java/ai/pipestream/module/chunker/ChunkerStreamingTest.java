@@ -348,24 +348,32 @@ class ChunkerStreamingTest {
     }
 
     @Test
-    void testStreamChunks_metadataMapStillPopulated() {
+    void testStreamChunks_metadataMapIsEmpty_typedAnalyticsCarriesData() {
+        // PR-K3 streaming mirror: the loose metadata map must be empty on
+        // streaming responses — every field that used to live in the loose
+        // map (word_count, sentence_count, content_hash, ...) now lives on
+        // the typed ChunkAnalytics proto only. If this regresses it means
+        // someone re-introduced a putAllMetadata / putMetadata call in
+        // ChunkerStreamingGrpcImpl — probably copy-pasted from the pre-K3
+        // code that is now gone.
         String text = loadResource("demo-documents/texts/sample_article.txt");
         List<StreamChunksResponse> chunks = streamChunks("body", text, "metadata_test", null);
 
-        // Legacy metadata map should still be populated alongside typed analytics
         for (StreamChunksResponse chunk : chunks) {
-            assertThat("Legacy metadata map should have word_count",
-                    chunk.getMetadataMap().containsKey("word_count"), is(true));
-            assertThat("Legacy metadata map should have sentence_count",
-                    chunk.getMetadataMap().containsKey("sentence_count"), is(true));
+            assertThat("Loose metadata map must be empty post-PR-K3 (found keys: "
+                            + chunk.getMetadataMap().keySet() + ")",
+                    chunk.getMetadataMap().isEmpty(), is(true));
 
-            // Typed analytics should agree with legacy metadata
-            if (chunk.hasChunkAnalytics()) {
-                int typedWordCount = chunk.getChunkAnalytics().getWordCount();
-                int legacyWordCount = (int) chunk.getMetadataMap().get("word_count").getNumberValue();
-                assertThat("Typed and legacy word_count should agree",
-                        typedWordCount, is(legacyWordCount));
-            }
+            // Typed ChunkAnalytics is now the canonical home for all stats.
+            assertThat("Typed ChunkAnalytics must be populated",
+                    chunk.hasChunkAnalytics(), is(true));
+            ChunkAnalytics ca = chunk.getChunkAnalytics();
+            assertThat("Typed word_count > 0", ca.getWordCount(), is(greaterThan(0)));
+            assertThat("Typed sentence_count > 0", ca.getSentenceCount(), is(greaterThan(0)));
+            assertThat("Typed character_count > 0", ca.getCharacterCount(), is(greaterThan(0)));
+            // content_hash promoted from loose map to typed field (PR-K2/K3)
+            assertThat("Typed content_hash is a 64-char lowercase hex SHA-256",
+                    ca.getContentHash().matches("^[0-9a-f]{64}$"), is(true));
         }
     }
 
