@@ -571,6 +571,15 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                         nlpSlice, nlpForSlicing,
                         c.originalIndexStart(), c.originalIndexEnd());
 
+                // PR-K2: promote content_hash to the typed ChunkAnalytics field
+                // (pipestream-protos PR #38 added the field). Keeps the loose-
+                // map "content_hash" entry above intact for backward compat —
+                // the duplication will be removed in a follow-up PR after a
+                // consumer audit confirms no readers depend on the loose key.
+                chunkAnalytics = chunkAnalytics.toBuilder()
+                        .setContentHash(contentHash)
+                        .build();
+
                 ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
                         .setTextContent(sanitizedText)
                         .setChunkId(chunkId)
@@ -693,6 +702,13 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
                     sanitizedText, i, sentences.length, false,
                     nlpSlice, nlpResult, start, end);
+
+            // PR-K2: promote content_hash to the typed ChunkAnalytics field.
+            // Same pattern as Path A — keeps the loose-map entry for
+            // backward compat and adds the typed field as canonical.
+            chunkAnalytics = chunkAnalytics.toBuilder()
+                    .setContentHash(contentHash)
+                    .build();
 
             ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
                     .setTextContent(sanitizedText)
