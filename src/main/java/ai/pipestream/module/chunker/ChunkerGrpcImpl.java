@@ -17,6 +17,7 @@ import ai.pipestream.module.chunker.service.NlpPreprocessor;
 import ai.pipestream.module.chunker.service.OverlapChunker;
 import ai.pipestream.module.chunker.service.UnicodeSanitizer;
 import ai.pipestream.data.v1.ChunkEmbedding;
+import ai.pipestream.data.v1.DocumentAnalytics;
 import ai.pipestream.data.v1.LogEntry;
 import ai.pipestream.data.v1.LogEntrySource;
 import ai.pipestream.data.v1.LogLevel;
@@ -40,10 +41,15 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
+import java.util.IntSummaryStatistics;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -217,6 +223,12 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 List<SemanticProcessingResult> outputSprs = new ArrayList<>();
                 // NLP cache: source text → NlpResult (computed once per unique text)
                 Map<String, NlpPreprocessor.NlpResult> nlpByText = new HashMap<>();
+                // DocumentAnalytics per directive source_label, so the Step 7
+                // SourceFieldAnalytics loop can stamp DocumentAnalytics on every
+                // SFA entry (§5.1 SourceFieldAnalytics.document_analytics, proto
+                // field 3). Built here once per unique source_label so we don't
+                // recompute for each chunker config on the same directive.
+                Map<String, DocumentAnalytics> docAnalyticsBySourceLabel = new LinkedHashMap<>();
 
                 for (VectorDirective directive : directives) {
                     String sourceLabel = directive.getSourceLabel();
@@ -234,6 +246,15 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     // Run NLP ONCE per unique source text within this request
                     NlpPreprocessor.NlpResult nlpResult = nlpByText.computeIfAbsent(
                             sourceText, t -> nlpPreprocessor.preprocess(t));
+
+                    // Compute DocumentAnalytics ONCE per source_label (the same
+                    // source_label will never yield different source_text in a
+                    // well-formed request; §21.2 enforces source_label uniqueness).
+                    final String srcLabelForDa = sourceLabel;
+                    final String srcTextForDa = sourceText;
+                    final NlpPreprocessor.NlpResult nlpForDa = nlpResult;
+                    docAnalyticsBySourceLabel.computeIfAbsent(srcLabelForDa,
+                            k -> metadataExtractor.extractDocumentAnalytics(srcTextForDa, nlpForDa));
 
                     String directiveKey = directiveKeys.get(directive);
 
@@ -330,16 +351,49 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 }
                 mergedSprs.addAll(outputSprs);
 
-                // Rebuild source_field_analytics from ALL merged SPRs
+                // Rebuild source_field_analytics from ALL merged SPRs.
+                // §5.1 SourceFieldAnalytics proto fields:
+                //   1. source_field
+                //   2. chunk_config_id
+                //   3. document_analytics   ← from docAnalyticsBySourceLabel
+                //   4. total_chunks         ← SPR.chunks.size()
+                //   5. average_chunk_size   ← IntSummaryStatistics on chunk text length
+                //   6. min_chunk_size       ← same
+                //   7. max_chunk_size       ← same
                 smBuilder.clearSourceFieldAnalytics();
                 Set<String> analyticsKeys = new HashSet<>();
                 for (SemanticProcessingResult spr : mergedSprs) {
                     String analyticsKey = spr.getSourceFieldName() + "|" + spr.getChunkConfigId();
                     if (analyticsKeys.add(analyticsKey)) {
-                        smBuilder.addSourceFieldAnalytics(SourceFieldAnalytics.newBuilder()
+                        List<SemanticChunk> chunksForSpr = spr.getChunksList();
+                        int totalChunks = chunksForSpr.size();
+
+                        SourceFieldAnalytics.Builder sfaBuilder = SourceFieldAnalytics.newBuilder()
                                 .setSourceField(spr.getSourceFieldName())
                                 .setChunkConfigId(spr.getChunkConfigId())
-                                .build());
+                                .setTotalChunks(totalChunks);
+
+                        if (totalChunks > 0) {
+                            IntSummaryStatistics sizeStats = chunksForSpr.stream()
+                                    .mapToInt(c -> c.getEmbeddingInfo().getTextContent().length())
+                                    .summaryStatistics();
+                            sfaBuilder
+                                    .setAverageChunkSize((float) sizeStats.getAverage())
+                                    .setMinChunkSize(sizeStats.getMin())
+                                    .setMaxChunkSize(sizeStats.getMax());
+                        }
+
+                        // document_analytics is only available for source_labels
+                        // this pass actually processed. Merged-in SPRs from prior
+                        // passes on other source_labels get no document_analytics
+                        // stamp — that's correct: we don't have the source text
+                        // for those in this request.
+                        DocumentAnalytics da = docAnalyticsBySourceLabel.get(spr.getSourceFieldName());
+                        if (da != null) {
+                            sfaBuilder.setDocumentAnalytics(da);
+                        }
+
+                        smBuilder.addSourceFieldAnalytics(sfaBuilder.build());
                     }
                 }
 
@@ -467,6 +521,18 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 Map<String, Value> extractedMetadata = metadataExtractor.extractAllMetadata(
                         sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder);
 
+                // §9 dedup groundwork: SHA-256 content_hash of the sanitised
+                // chunk text, stamped into the chunk metadata map. Identical
+                // sanitised text → identical hash, so reprocessing can skip
+                // already-computed chunks, downstream embedders can use the
+                // hash as a cache key, and a future OpenVINO chunker backend
+                // can be byte-verified against this implementation via hash
+                // equality on the same input. Same scheme the streaming impl
+                // uses at ChunkerStreamingGrpcImpl.java:139-141.
+                String contentHash = sha256Hex(sanitizedText);
+                extractedMetadata.put("content_hash",
+                        Value.newBuilder().setStringValue(contentHash).build());
+
                 // §4.1: chunk_analytics is ALWAYS populated. The streaming impl at
                 // ChunkerStreamingGrpcImpl already does this; the non-streaming
                 // rewrite must match so the output passes assertPostChunker.
@@ -567,6 +633,25 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
             String sanitizedText = UnicodeSanitizer.sanitizeInvalidUnicode(sentText);
 
+            // Legacy string-keyed metadata map — Path A populates it at
+            // processOneDirectiveConfig, so Path B must too or downstream
+            // consumers that read from SemanticChunk.metadata silently get
+            // empty data on every sentence chunk. containsUrlPlaceholder=false
+            // because Path B walks raw NLP sentence spans and never runs the
+            // URL substitute/restore pipeline — any URL in sanitizedText is
+            // a real URL, not a placeholder.
+            Map<String, Value> extractedMetadata = metadataExtractor.extractAllMetadata(
+                    sanitizedText, i, sentences.length, false);
+
+            // §9 dedup groundwork: SHA-256 content_hash of the sanitised
+            // sentence text, stamped into the chunk metadata map. Same
+            // scheme and key name as Path A so downstream dedup logic can
+            // work uniformly across both paths. Identical sentences across
+            // docs → identical hash → dedup candidate.
+            String contentHash = sha256Hex(sanitizedText);
+            extractedMetadata.put("content_hash",
+                    Value.newBuilder().setStringValue(contentHash).build());
+
             // §4.1: chunk_analytics is ALWAYS populated, including on sentences_internal chunks.
             // 7-arg overload populates POS densities by slicing the doc-level
             // NlpResult on this sentence's original-text [start, end] byte range.
@@ -590,6 +675,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     .setChunkNumber(i)
                     .setEmbeddingInfo(embedding)
                     .setChunkAnalytics(chunkAnalytics)
+                    .putAllMetadata(extractedMetadata)
                     .build();
 
             result.add(chunk);
@@ -649,6 +735,16 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
      * Parses a {@link NamedChunkerConfig}'s opaque {@link Struct} into a {@link ChunkerConfig}
      * POJO using Jackson + JsonFormat, and overrides {@code sourceField} with the directive's
      * {@code source_label} so the OverlapChunker reads from the correct field.
+     *
+     * <p>Fail-loud policy (§21.1 no-fallback rule): if the per-config Struct is
+     * non-empty but fails to parse (bad field name, wrong type, malformed JSON),
+     * throws {@link IllegalArgumentException} so the request returns
+     * {@code PROCESSING_OUTCOME_FAILURE} with a human-readable error message.
+     * An empty or missing Struct is NOT an error — it's the explicit "use
+     * defaults" signal — but a malformed Struct means the caller sent garbage
+     * and must be told, not silently demoted to the default token chunker.
+     * Pre-R1 behavior threw on this case; R1-pack-2 accidentally demoted it to
+     * a WARN-and-default, which the post-R1 correctness audit flagged.
      */
     private ChunkerConfig parseNamedChunkerConfig(NamedChunkerConfig namedConfig, String sourceLabel) {
         Struct configStruct = namedConfig.getConfig();
@@ -660,9 +756,10 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 String jsonStr = JsonFormat.printer().print(configStruct);
                 base = objectMapper.readValue(jsonStr, ChunkerConfig.class);
             } catch (Exception e) {
-                LOG.warnf("Failed to parse NamedChunkerConfig '%s' — using defaults: %s",
-                        namedConfig.getConfigId(), e.getMessage());
-                base = ChunkerConfig.createDefault();
+                String msg = "Invalid NamedChunkerConfig '" + namedConfig.getConfigId()
+                        + "' for source_label='" + sourceLabel + "': " + e.getMessage();
+                LOG.warnf("INVALID_ARGUMENT: %s", msg);
+                throw new IllegalArgumentException(msg, e);
             }
         }
 
@@ -722,6 +819,30 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 .setTimestampEpochMs(System.currentTimeMillis())
                 .setModule(ModuleLogOrigin.newBuilder().setModuleName("chunker").build())
                 .build();
+    }
+
+    /**
+     * Computes the SHA-256 hash of the given text and returns it as a lowercase
+     * hex string. Used as the chunk-level {@code content_hash} stamped into the
+     * {@code SemanticChunk.metadata} map — same scheme the streaming impl uses
+     * (see {@link ChunkerStreamingGrpcImpl#sha256Hex(String)}). Duplicated
+     * locally to keep the unary and streaming impls independent; extraction to
+     * a shared util is a separate refactor if ever needed.
+     *
+     * <p>The hash enables reprocessing dedup (identical chunk text → identical
+     * hash → downstream can skip re-embedding), content-addressed storage, and
+     * cross-implementation byte-identity checks (future: OpenVINO chunker
+     * backend would produce the same hash for the same sanitised text).
+     */
+    private static String sha256Hex(String text) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is mandatory in every JDK
+            throw new AssertionError("SHA-256 not available", e);
+        }
     }
 
     private ProcessDataResponse createErrorResponse(String errorMessage, Exception e) {
