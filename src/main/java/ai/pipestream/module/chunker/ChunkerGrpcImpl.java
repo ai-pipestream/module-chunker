@@ -16,6 +16,7 @@ import ai.pipestream.module.chunker.service.ChunkMetadataExtractor;
 import ai.pipestream.module.chunker.service.NlpPreprocessor;
 import ai.pipestream.module.chunker.service.OverlapChunker;
 import ai.pipestream.module.chunker.service.UnicodeSanitizer;
+import ai.pipestream.module.chunker.support.ChunkerSupport;
 import ai.pipestream.data.v1.ChunkEmbedding;
 import ai.pipestream.data.v1.DocumentAnalytics;
 import ai.pipestream.data.v1.LogEntry;
@@ -310,7 +311,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                             String sourceLabel = directive.getSourceLabel();
                             NlpPreprocessor.NlpResult nlpResult = resolved.nlpResult();
 
-                            NlpDocumentAnalysis nlpAnalysis = buildNlpAnalysis(nlpResult);
+                            NlpDocumentAnalysis nlpAnalysis = ChunkerSupport.buildNlpAnalysis(nlpResult);
                             String directiveKey = resolved.directiveKey();
                             List<SemanticChunk> sentenceChunks = buildSentenceChunks(
                                     docHash, sourceLabel, SENTENCES_INTERNAL_CONFIG_ID, nlpResult);
@@ -571,7 +572,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 // can be byte-verified against this implementation via hash
                 // equality on the same input. Same scheme the streaming impl
                 // uses at ChunkerStreamingGrpcImpl.java:139-141.
-                String contentHash = sha256Hex(sanitizedText);
+                String contentHash = ChunkerSupport.sha256Hex(sanitizedText);
                 extractedMetadata.put("content_hash",
                         Value.newBuilder().setStringValue(contentHash).build());
 
@@ -630,7 +631,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
         // ------------------------------------------------------------------
         // Build SPR with deterministic result_id and directive_key stamp (§21.2, §21.5)
         // ------------------------------------------------------------------
-        NlpDocumentAnalysis nlpAnalysis = buildNlpAnalysis(nlpResult);
+        NlpDocumentAnalysis nlpAnalysis = ChunkerSupport.buildNlpAnalysis(nlpResult);
 
         // §21.5 deterministic result_id: stage1:{docHash}:{sourceLabel}:{chunkerConfigId}:
         String resultId = "stage1:" + docHash + ":" + sourceLabel + ":" + chunkerConfigId + ":";
@@ -708,7 +709,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             // scheme and key name as Path A so downstream dedup logic can
             // work uniformly across both paths. Identical sentences across
             // docs → identical hash → dedup candidate.
-            String contentHash = sha256Hex(sanitizedText);
+            String contentHash = ChunkerSupport.sha256Hex(sanitizedText);
             extractedMetadata.put("content_hash",
                     Value.newBuilder().setStringValue(contentHash).build());
 
@@ -866,42 +867,6 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
         return resolved;
     }
 
-    /**
-     * Converts an {@link NlpPreprocessor.NlpResult} to the proto {@link NlpDocumentAnalysis}.
-     * Mirrors the same conversion in {@link ChunkerStreamingGrpcImpl}.
-     */
-    private static NlpDocumentAnalysis buildNlpAnalysis(NlpPreprocessor.NlpResult nlpResult) {
-        NlpDocumentAnalysis.Builder builder = NlpDocumentAnalysis.newBuilder()
-                .setDetectedLanguage(nlpResult.detectedLanguage())
-                .setLanguageConfidence(nlpResult.languageConfidence())
-                .setTotalTokens(nlpResult.tokens().length)
-                .setNounDensity(nlpResult.nounDensity())
-                .setVerbDensity(nlpResult.verbDensity())
-                .setAdjectiveDensity(nlpResult.adjectiveDensity())
-                .setAdverbDensity(nlpResult.adverbDensity())
-                .setContentWordRatio(nlpResult.contentWordRatio())
-                .setUniqueLemmaCount(nlpResult.uniqueLemmaCount())
-                .setLexicalDensity(nlpResult.lexicalDensity());
-
-        String[] sentences = nlpResult.sentences();
-        opennlp.tools.util.Span[] spans = nlpResult.sentenceSpans();
-        if (sentences != null) {
-            for (int i = 0; i < sentences.length; i++) {
-                if (sentences[i] == null) continue;
-                int start = (spans != null && i < spans.length && spans[i] != null)
-                        ? spans[i].getStart() : 0;
-                int end = (spans != null && i < spans.length && spans[i] != null)
-                        ? spans[i].getEnd() : sentences[i].length();
-                builder.addSentences(SentenceSpan.newBuilder()
-                        .setText(sentences[i])
-                        .setStartOffset(start)
-                        .setEndOffset(end)
-                        .build());
-            }
-        }
-        return builder.build();
-    }
-
     private static LogEntry moduleLog(String message, LogLevel level) {
         return LogEntry.newBuilder()
                 .setSource(LogEntrySource.LOG_ENTRY_SOURCE_MODULE)
@@ -929,30 +894,6 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             NlpPreprocessor.NlpResult nlpResult,
             String directiveKey
     ) {}
-
-    /**
-     * Computes the SHA-256 hash of the given text and returns it as a lowercase
-     * hex string. Used as the chunk-level {@code content_hash} stamped into the
-     * {@code SemanticChunk.metadata} map — same scheme the streaming impl uses
-     * (see {@link ChunkerStreamingGrpcImpl#sha256Hex(String)}). Duplicated
-     * locally to keep the unary and streaming impls independent; extraction to
-     * a shared util is a separate refactor if ever needed.
-     *
-     * <p>The hash enables reprocessing dedup (identical chunk text → identical
-     * hash → downstream can skip re-embedding), content-addressed storage, and
-     * cross-implementation byte-identity checks (future: OpenVINO chunker
-     * backend would produce the same hash for the same sanitised text).
-     */
-    private static String sha256Hex(String text) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (NoSuchAlgorithmException e) {
-            // SHA-256 is mandatory in every JDK
-            throw new AssertionError("SHA-256 not available", e);
-        }
-    }
 
     private ProcessDataResponse createErrorResponse(String errorMessage, Exception e) {
         ProcessDataResponse.Builder responseBuilder = ProcessDataResponse.newBuilder();

@@ -13,6 +13,7 @@ import ai.pipestream.module.chunker.model.ChunkingResult;
 import ai.pipestream.module.chunker.service.ChunkMetadataExtractor;
 import ai.pipestream.module.chunker.service.NlpPreprocessor;
 import ai.pipestream.module.chunker.service.OverlapChunker;
+import ai.pipestream.module.chunker.support.ChunkerSupport;
 import ai.pipestream.semantic.v1.ChunkAlgorithm;
 import ai.pipestream.semantic.v1.ChunkConfigEntry;
 import ai.pipestream.semantic.v1.SemanticChunkerService;
@@ -26,10 +27,6 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -97,7 +94,7 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                 DocumentAnalytics docAnalytics = metadataExtractor.extractDocumentAnalytics(textContent, nlpResult);
 
                 // Build NlpDocumentAnalysis proto from the NLP result
-                NlpDocumentAnalysis nlpAnalysis = buildNlpAnalysis(nlpResult);
+                NlpDocumentAnalysis nlpAnalysis = ChunkerSupport.buildNlpAnalysis(nlpResult);
 
                 // Build a minimal PipeDoc for OverlapChunker
                 PipeDoc pipeDoc = buildPipeDoc(docId, effectiveSourceField, textContent);
@@ -136,7 +133,7 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                                 nlpResult, chunk.originalIndexStart(), chunk.originalIndexEnd());
 
                         // Compute SHA-256 content hash
-                        String contentHash = sha256Hex(chunk.text());
+                        String contentHash = ChunkerSupport.sha256Hex(chunk.text());
                         chunkMetadata.put("content_hash",
                                 com.google.protobuf.Value.newBuilder().setStringValue(contentHash).build());
 
@@ -243,7 +240,7 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                             chunk.text(), i, chunks.size(), false);
 
                     // Compute SHA-256 content hash of the chunk text
-                    String contentHash = sha256Hex(chunk.text());
+                    String contentHash = ChunkerSupport.sha256Hex(chunk.text());
                     chunkMetadata.put("content_hash",
                             com.google.protobuf.Value.newBuilder().setStringValue(contentHash).build());
 
@@ -329,45 +326,4 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
         return docBuilder.build();
     }
 
-    /**
-     * Converts an {@link NlpPreprocessor.NlpResult} to the proto {@link NlpDocumentAnalysis}.
-     * This carries the full NLP pass results back to the semantic-manager.
-     */
-    private NlpDocumentAnalysis buildNlpAnalysis(NlpPreprocessor.NlpResult nlpResult) {
-        NlpDocumentAnalysis.Builder builder = NlpDocumentAnalysis.newBuilder()
-                .setDetectedLanguage(nlpResult.detectedLanguage())
-                .setLanguageConfidence(nlpResult.languageConfidence())
-                .setTotalTokens(nlpResult.tokens().length)
-                .setNounDensity(nlpResult.nounDensity())
-                .setVerbDensity(nlpResult.verbDensity())
-                .setAdjectiveDensity(nlpResult.adjectiveDensity())
-                .setAdverbDensity(nlpResult.adverbDensity())
-                .setContentWordRatio(nlpResult.contentWordRatio())
-                .setUniqueLemmaCount(nlpResult.uniqueLemmaCount())
-                .setLexicalDensity(nlpResult.lexicalDensity());
-
-        // Add sentence spans
-        for (int i = 0; i < nlpResult.sentences().length; i++) {
-            builder.addSentences(SentenceSpan.newBuilder()
-                    .setText(nlpResult.sentences()[i])
-                    .setStartOffset(nlpResult.sentenceSpans()[i].getStart())
-                    .setEndOffset(nlpResult.sentenceSpans()[i].getEnd())
-                    .build());
-        }
-        return builder.build();
-    }
-
-    /**
-     * Computes the SHA-256 hash of the given text and returns it as a lowercase hex string.
-     */
-    private static String sha256Hex(String text) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (NoSuchAlgorithmException e) {
-            // SHA-256 is guaranteed to be available in every JDK
-            throw new AssertionError("SHA-256 not available", e);
-        }
-    }
 }

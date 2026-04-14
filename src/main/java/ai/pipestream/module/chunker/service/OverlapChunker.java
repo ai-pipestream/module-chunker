@@ -59,32 +59,6 @@ public class OverlapChunker {
     }
 
     /**
-     * Helper method to squish a list of strings into a single string.
-     * 
-     * @param list List of strings to squish
-     * @return A list containing a single concatenated string, or empty list if input is empty
-     */
-    public List<String> squish(List<String> list) {
-        if (list == null || list.isEmpty()) {
-            return Collections.emptyList();
-        }
-        List<String> result = new ArrayList<>();
-        StringBuilder currentString = new StringBuilder();
-        for (String s : list) {
-            if (s != null && !s.isEmpty()) {
-                if (currentString.length() > 0) {
-                    currentString.append(" ");
-                }
-                currentString.append(s.trim());
-            }
-        }
-        if (currentString.length() > 0) {
-            result.add(currentString.toString());
-        }
-        return result;
-    }
-
-    /**
      * Cleans text by normalizing whitespace and line endings.
      * Based on the existing squish logic but adapted for single strings.
      * 
@@ -298,19 +272,6 @@ public class OverlapChunker {
         );
 
         return createChunksInternal(document, options, config, streamId, pipeStepName, nlpResult);
-    }
-
-    /**
-     * Main method to create chunks from a document using legacy ChunkerOptions.
-     * 
-     * @param document The PipeDoc to chunk
-     * @param options Chunking configuration options
-     * @param streamId Stream ID for logging and chunk ID generation
-     * @param pipeStepName Pipeline step name for logging
-     * @return ChunkingResult containing the created chunks and URL placeholder mappings
-     */
-    public ChunkingResult createChunks(PipeDoc document, ChunkerOptions options, String streamId, String pipeStepName) {
-        return createChunksInternal(document, options, null, streamId, pipeStepName);
     }
 
     /**
