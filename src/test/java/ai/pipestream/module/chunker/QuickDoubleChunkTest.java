@@ -3,9 +3,9 @@ package ai.pipestream.module.chunker;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
+import ai.pipestream.data.v1.VectorSetDirectives;
 import ai.pipestream.data.module.v1.*;
 import ai.pipestream.data.module.v1.ProcessingOutcome;
-import ai.pipestream.module.chunker.model.ChunkerOptions;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
@@ -18,6 +18,13 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.UUID;
 
+/**
+ * Generates quick double-chunk test data via the directive-driven path (R1-pack-2).
+ *
+ * <p><b>Migration note (R1-pack-2):</b> the legacy {@code json_config} path is gone.
+ * Docs carry {@code vector_set_directives}; chunker config params live inside
+ * {@link ai.pipestream.data.v1.NamedChunkerConfig#getConfig()}.
+ */
 @QuarkusTest
 public class QuickDoubleChunkTest {
     private static final Logger log = LoggerFactory.getLogger(QuickDoubleChunkTest.class);
@@ -39,15 +46,13 @@ public class QuickDoubleChunkTest {
                 .build())
             .build();
 
-        // First chunking
-        PipeDoc firstChunked = chunk(testDoc, new ChunkerOptions(
-            "body", 100, 20, "%s_%s_chunk_%d", "large_v1",
-            "first_%s_%s", "[FIRST] ", false));
+        // First chunking: large chunks
+        VectorSetDirectives firstDirectives = TestDirectiveBuilder.withSingleTokenDirective("body", 100, 20);
+        PipeDoc firstChunked = chunk(testDoc, firstDirectives);
 
-        // Second chunking
-        PipeDoc doubleChunked = chunk(firstChunked, new ChunkerOptions(
-            "body", 50, 10, "%s_%s_chunk_%d", "small_v1",
-            "second_%s_%s", "[SECOND] ", false));
+        // Second chunking: small chunks — different config_id so IDs don't collide
+        VectorSetDirectives secondDirectives = TestDirectiveBuilder.withSingleTokenDirective("body", 50, 10);
+        PipeDoc doubleChunked = chunk(firstChunked, secondDirectives);
 
         // Save result
         Path outputDir = Paths.get("modules/chunker/src/test/resources/double_chunked_pipedocs");
@@ -57,24 +62,35 @@ public class QuickDoubleChunkTest {
         log.info("Created double-chunked test data");
     }
 
-    private PipeDoc chunk(PipeDoc doc, ChunkerOptions config) {
+    private PipeDoc chunk(PipeDoc doc, VectorSetDirectives directives) {
+        // Merge directives onto existing search_metadata (preserve prior SPRs)
+        SearchMetadata existingMeta = doc.hasSearchMetadata()
+                ? doc.getSearchMetadata()
+                : SearchMetadata.getDefaultInstance();
+        SearchMetadata updatedMeta = existingMeta.toBuilder()
+                .setVectorSetDirectives(directives)
+                .build();
+        PipeDoc docWithDirectives = doc.toBuilder().setSearchMetadata(updatedMeta).build();
+
         try {
             ProcessDataRequest request = ProcessDataRequest.newBuilder()
-                .setDocument(doc)
+                .setDocument(docWithDirectives)
                 .setMetadata(ServiceMetadata.newBuilder()
                     .setPipelineName("quick-test")
                     .setPipeStepName("chunker")
                     .setStreamId(UUID.randomUUID().toString())
                     .build())
                 .setConfig(ProcessConfiguration.newBuilder()
-                    .setJsonConfig(config.toStruct())
+                    .setJsonConfig(com.google.protobuf.Struct.getDefaultInstance())
                     .build())
                 .build();
 
             ProcessDataResponse response = chunkerService.processData(request)
                 .await().atMost(java.time.Duration.ofSeconds(30));
 
-            return response.getOutcome() == ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS ? response.getOutputDoc() : doc;
+            return response.getOutcome() == ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS
+                    ? response.getOutputDoc()
+                    : doc;
         } catch (Exception e) {
             log.error("Chunking failed: {}", e.getMessage());
             return doc;

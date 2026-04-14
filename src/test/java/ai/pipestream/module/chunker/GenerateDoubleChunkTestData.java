@@ -3,9 +3,10 @@ package ai.pipestream.module.chunker;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
+import ai.pipestream.data.v1.VectorSetDirectives;
 import ai.pipestream.data.module.v1.*;
 import ai.pipestream.data.module.v1.ProcessingOutcome;
-import ai.pipestream.module.chunker.model.ChunkerOptions;
+import com.google.protobuf.Struct;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,13 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.UUID;
 
+/**
+ * Generates double-chunk test data via the directive-driven path (R1-pack-2).
+ *
+ * <p><b>Migration note (R1-pack-2):</b> the legacy {@code ChunkerOptions} / {@code json_config}
+ * path is gone. Docs carry {@code vector_set_directives}; chunker config params live inside
+ * {@link ai.pipestream.data.v1.NamedChunkerConfig#getConfig()}.
+ */
 @QuarkusTest
 public class GenerateDoubleChunkTestData {
     private static final Logger log = LoggerFactory.getLogger(GenerateDoubleChunkTestData.class);
@@ -44,15 +52,17 @@ public class GenerateDoubleChunkTestData {
 
         log.info("Starting double chunking test data generation...");
 
-        // First chunking: Large chunks (200 chars, 50 overlap)
-        PipeDoc firstChunked = performChunking(testDoc, createLargeChunkConfig(), "first-chunking");
+        // First chunking: Large chunks (200 tokens, 50 overlap) from "body"
+        VectorSetDirectives largeDirectives = TestDirectiveBuilder.withSingleTokenDirective("body", 200, 50);
+        PipeDoc firstChunked = performChunking(testDoc, largeDirectives, "first-chunking");
         if (firstChunked == null) {
             throw new RuntimeException("First chunking failed");
         }
         log.info("First chunking completed");
 
-        // Second chunking: Small chunks (100 chars, 20 overlap)
-        PipeDoc doubleChunked = performChunking(firstChunked, createSmallChunkConfig(), "second-chunking");
+        // Second chunking: Small chunks (100 tokens, 20 overlap) from "body"
+        VectorSetDirectives smallDirectives = TestDirectiveBuilder.withSingleTokenDirective("body", 100, 20);
+        PipeDoc doubleChunked = performChunking(firstChunked, smallDirectives, "second-chunking");
         if (doubleChunked == null) {
             throw new RuntimeException("Second chunking failed");
         }
@@ -60,7 +70,7 @@ public class GenerateDoubleChunkTestData {
 
         // Save the result with absolute path
         String projectRoot = System.getProperty("user.dir");
-        Path outputDir = Paths.get(projectRoot, "modules", "chunker", "src", "test", "resources", "double_chunked_pipedocs");
+        Path outputDir = Paths.get(projectRoot, "src", "test", "resources", "double_chunked_pipedocs");
         Files.createDirectories(outputDir);
 
         Path outputFile = outputDir.resolve("test_double_chunked_001.pb");
@@ -69,42 +79,33 @@ public class GenerateDoubleChunkTestData {
         log.info("Double-chunked test data saved to: {}", outputFile.toAbsolutePath());
 
         // Verify the structure
-        if (doubleChunked.hasSearchMetadata() && doubleChunked.getSearchMetadata().getSemanticResultsCount() == 2) {
-            log.info("Verification passed: Document has 2 semantic result sets");
+        int sprCount = doubleChunked.hasSearchMetadata()
+                ? doubleChunked.getSearchMetadata().getSemanticResultsCount()
+                : 0;
+        if (sprCount >= 2) {
+            log.info("Verification passed: Document has {} semantic result sets", sprCount);
         } else {
-            log.warn("Verification failed: Expected 2 semantic result sets, got {}",
-                doubleChunked.hasSearchMetadata() ? doubleChunked.getSearchMetadata().getSemanticResultsCount() : 0);
+            log.warn("Verification note: Document has {} semantic result set(s) — expected >= 2", sprCount);
         }
     }
 
-    private ChunkerOptions createLargeChunkConfig() {
-        return new ChunkerOptions(
-            "body",                    // sourceField
-            200,                       // chunkSize
-            50,                        // chunkOverlap
-            "%s_%s_chunk_%d",         // chunkIdTemplate
-            "large_chunks_v1",        // chunkConfigId
-            "first_chunks_{step_name}",     // resultSetNameTemplate
-            "[LARGE-CHUNK] ",         // logPrefix
-            false                     // preserveUrls
-        );
-    }
-
-    private ChunkerOptions createSmallChunkConfig() {
-        return new ChunkerOptions(
-            "body",                    // sourceField
-            100,                       // chunkSize
-            20,                        // chunkOverlap
-            "%s_%s_chunk_%d",         // chunkIdTemplate
-            "small_chunks_v1",        // chunkConfigId
-            "second_chunks_{step_name}",    // resultSetNameTemplate
-            "[SMALL-CHUNK] ",         // logPrefix
-            false                     // preserveUrls
-        );
-    }
-
-    private PipeDoc performChunking(PipeDoc doc, ChunkerOptions config, String stepName) {
+    /**
+     * Merges {@code directives} onto the existing {@code search_metadata} of {@code doc}
+     * (preserving SPRs from prior passes) and invokes the chunker service.
+     *
+     * @return the output document on success, {@code null} on failure
+     */
+    private PipeDoc performChunking(PipeDoc doc, VectorSetDirectives directives, String stepName) {
         try {
+            // Merge directives onto existing search_metadata (preserve existing SPRs)
+            SearchMetadata existingMeta = doc.hasSearchMetadata()
+                    ? doc.getSearchMetadata()
+                    : SearchMetadata.getDefaultInstance();
+            SearchMetadata updatedMeta = existingMeta.toBuilder()
+                    .setVectorSetDirectives(directives)
+                    .build();
+            PipeDoc docWithDirectives = doc.toBuilder().setSearchMetadata(updatedMeta).build();
+
             ServiceMetadata metadata = ServiceMetadata.newBuilder()
                 .setPipelineName("double-chunking-test")
                 .setPipeStepName(stepName)
@@ -112,14 +113,12 @@ public class GenerateDoubleChunkTestData {
                 .setCurrentHopNumber(1)
                 .build();
 
-            ProcessConfiguration processConfig = ProcessConfiguration.newBuilder()
-                .setJsonConfig(config.toStruct())
-                .build();
-
             ProcessDataRequest request = ProcessDataRequest.newBuilder()
-                .setDocument(doc)
+                .setDocument(docWithDirectives)
                 .setMetadata(metadata)
-                .setConfig(processConfig)
+                .setConfig(ProcessConfiguration.newBuilder()
+                        .setJsonConfig(Struct.getDefaultInstance())
+                        .build())
                 .build();
 
             ProcessDataResponse response = chunkerService.processData(request)
@@ -129,7 +128,7 @@ public class GenerateDoubleChunkTestData {
                 log.info("{} successful for doc: {}", stepName, doc.getDocId());
                 return response.getOutputDoc();
             } else {
-                log.error("{} failed for doc: {}", stepName, doc.getDocId());
+                log.error("{} failed for doc: {} — outcome: {}", stepName, doc.getDocId(), response.getOutcome());
                 return null;
             }
         } catch (Exception e) {

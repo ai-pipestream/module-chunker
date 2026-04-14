@@ -1,10 +1,10 @@
 package ai.pipestream.module.chunker;
 
 import com.google.protobuf.Struct;
-import com.google.protobuf.Value;
 import ai.pipestream.data.v1.PipeDoc;
 import ai.pipestream.data.v1.ProcessConfiguration;
 import ai.pipestream.data.v1.SearchMetadata;
+import ai.pipestream.data.v1.VectorSetDirectives;
 import ai.pipestream.data.module.v1.*;
 import ai.pipestream.data.module.v1.ProcessingOutcome;
 import io.quarkus.grpc.GrpcClient;
@@ -19,8 +19,13 @@ import static org.hamcrest.Matchers.*;
 
 /**
  * Verifies that the chunker service advertises the ChunkerConfig schema and that
- * requests constructed with ChunkerConfig-compatible JSON field names are accepted.
- * This acts as a guard to keep tests and config serialization aligned with the service contract.
+ * directive-driven requests (R1-pack-2 path) are accepted and produce correct output.
+ *
+ * <p><b>Migration note (R1-pack-2):</b> the {@code processData} test now uses
+ * directive-driven input per DESIGN.md §7.1. The schema advertisement test
+ * ({@link #schemaShouldAdvertiseChunkerConfigFields}) is unchanged because the
+ * schema registration reflects the per-config Struct format that lives inside
+ * {@link ai.pipestream.data.v1.NamedChunkerConfig#getConfig()}.
  */
 @QuarkusTest
 public class ChunkerConfigSchemaCompatibilityTest {
@@ -44,7 +49,7 @@ public class ChunkerConfigSchemaCompatibilityTest {
         assertThat(schema, containsString("chunkOverlap"));
         assertThat(schema, containsString("preserveUrls"));
         assertThat(schema, containsString("cleanText"));
-        assertThat(schema, not(containsString("config_id"))); // node_id is the identifier; opensearch-manager derives field names
+        assertThat(schema, not(containsString("config_id")));
 
         // Ensure legacy snake_case options are not promoted by schema (guardrail)
         assertThat(schema, not(containsString("source_field")));
@@ -54,17 +59,23 @@ public class ChunkerConfigSchemaCompatibilityTest {
     }
 
     @Test
-    void processDataShouldAcceptChunkerConfigJson() {
-        // Minimal test document
+    void processDataShouldAcceptDirectiveDrivenRequest() {
+        // R1-pack-2: doc carries vector_set_directives; NamedChunkerConfig.config
+        // holds the per-config chunker parameters (token algorithm, chunkSize=120).
+        String configId = "token_120_24";
+        VectorSetDirectives directives = TestDirectiveBuilder
+                .withSingleTokenDirective("body", 120, 24);
+
         PipeDoc testDoc = PipeDoc.newBuilder()
             .setDocId("schema-compat-doc-" + UUID.randomUUID())
             .setSearchMetadata(SearchMetadata.newBuilder()
                 .setTitle("Schema Compat Title")
-                .setBody("This body text will be chunked using ChunkerConfig-compatible JSON fields.")
+                .setBody("This body text will be chunked using directive-driven JSON config fields " +
+                        "through the new DESIGN.md §7.1 path. Adding enough words to produce real output.")
+                .setVectorSetDirectives(directives)
                 .build())
             .build();
 
-        // Service metadata
         ServiceMetadata metadata = ServiceMetadata.newBuilder()
             .setPipelineName("schema-compat-pipeline")
             .setPipeStepName("schema-compat-step")
@@ -72,18 +83,9 @@ public class ChunkerConfigSchemaCompatibilityTest {
             .setCurrentHopNumber(1)
             .build();
 
-        // Construct a ChunkerConfig-compatible Struct (no config_id; node/step = pipeStepName is the identifier)
-        String pipeStepName = "schema-compat-step";
-        Struct.Builder cfg = Struct.newBuilder()
-            .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
-            .putFields("sourceField", Value.newBuilder().setStringValue("body").build())
-            .putFields("chunkSize", Value.newBuilder().setNumberValue(120).build())
-            .putFields("chunkOverlap", Value.newBuilder().setNumberValue(24).build())
-            .putFields("preserveUrls", Value.newBuilder().setBoolValue(true).build())
-            .putFields("cleanText", Value.newBuilder().setBoolValue(true).build());
-
+        // json_config holds ChunkerStepOptions (empty → defaults)
         ProcessConfiguration processConfig = ProcessConfiguration.newBuilder()
-            .setJsonConfig(cfg.build())
+            .setJsonConfig(Struct.getDefaultInstance())
             .build();
 
         ProcessDataRequest request = ProcessDataRequest.newBuilder()
@@ -97,12 +99,20 @@ public class ChunkerConfigSchemaCompatibilityTest {
             .awaitItem()
             .getItem();
 
-        assertThat("ChunkerConfig JSON should be accepted", response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
+        assertThat("Directive-driven request should be accepted",
+                response.getOutcome(), is(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS));
         assertThat("Output document should be present", response.hasOutputDoc(), is(true));
-        assertThat("Semantic results should be created", response.getOutputDoc().getSearchMetadata().getSemanticResultsCount(), is(greaterThan(0)));
+        assertThat("Semantic results should be created",
+                response.getOutputDoc().getSearchMetadata().getSemanticResultsCount(),
+                is(greaterThan(0)));
 
-        var result = response.getOutputDoc().getSearchMetadata().getSemanticResults(0);
-        assertThat("Result chunkConfigId should be pipe step name (node id)", result.getChunkConfigId(), is(equalTo(pipeStepName)));
-        assertThat("Should produce at least one chunk", result.getChunksCount(), is(greaterThan(0)));
+        // Find the main SPR (not sentences_internal)
+        var mainSpr = response.getOutputDoc().getSearchMetadata().getSemanticResultsList().stream()
+                .filter(spr -> !"sentences_internal".equals(spr.getChunkConfigId()))
+                .findFirst().orElse(null);
+        assertThat("Should have at least one non-sentences_internal SPR", mainSpr, is(notNullValue()));
+        assertThat("chunk_config_id should match the NamedChunkerConfig.config_id",
+                mainSpr.getChunkConfigId(), is(equalTo("token_120_24")));
+        assertThat("Should produce at least one chunk", mainSpr.getChunksCount(), is(greaterThan(0)));
     }
 }
