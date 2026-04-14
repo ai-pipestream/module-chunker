@@ -470,8 +470,16 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 // §4.1: chunk_analytics is ALWAYS populated. The streaming impl at
                 // ChunkerStreamingGrpcImpl already does this; the non-streaming
                 // rewrite must match so the output passes assertPostChunker.
+                //
+                // 7-arg overload: slices the doc-level NlpResult (posTags + lemmas
+                // + tokenSpans) on the chunk's original-text [start, end] byte
+                // range to compute per-chunk POS densities (noun/verb/adjective),
+                // content_word_ratio, unique_lemma_count, and lexical_density.
+                // Same data path the streaming impl uses — closes the feature
+                // parity gap the post-R1 correctness audit flagged.
                 ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
-                        sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder);
+                        sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder,
+                        nlpResult, c.originalIndexStart(), c.originalIndexEnd());
 
                 ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
                         .setTextContent(sanitizedText)
@@ -560,8 +568,13 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             String sanitizedText = UnicodeSanitizer.sanitizeInvalidUnicode(sentText);
 
             // §4.1: chunk_analytics is ALWAYS populated, including on sentences_internal chunks.
+            // 7-arg overload populates POS densities by slicing the doc-level
+            // NlpResult on this sentence's original-text [start, end] byte range.
+            // containsUrlPlaceholder=false because Path B walks raw NLP sentence
+            // spans and never runs through the URL substitution/restore pipeline.
             ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
-                    sanitizedText, i, sentences.length, false);
+                    sanitizedText, i, sentences.length, false,
+                    nlpResult, start, end);
 
             ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
                     .setTextContent(sanitizedText)
