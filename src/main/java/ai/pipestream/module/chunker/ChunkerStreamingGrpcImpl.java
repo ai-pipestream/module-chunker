@@ -28,7 +28,6 @@ import jakarta.inject.Singleton;
 import org.jboss.logging.Logger;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * Streaming gRPC service for chunking text. Implements the SemanticChunkerService
@@ -125,17 +124,29 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                         boolean isLastChunkInConfig = (i == chunks.size() - 1);
                         boolean isVeryLastChunk = isLastConfig && isLastChunkInConfig;
 
-                        // Extract metadata (legacy map) and typed analytics
-                        Map<String, com.google.protobuf.Value> chunkMetadata = metadataExtractor.extractAllMetadata(
-                                chunk.text(), i, chunks.size(), false);
+                        // PR-I mirror: compute the NLP slice ONCE per chunk so
+                        // extractChunkAnalytics reuses it for POS density +
+                        // base text stats instead of re-running OpenNLP on
+                        // chunk text. sliceForChunk returns null if the
+                        // doc-level NLP is missing or the offsets don't
+                        // line up; the extractor then falls back to per-chunk
+                        // OpenNLP.
+                        ChunkMetadataExtractor.ChunkNlpSlice nlpSlice =
+                                metadataExtractor.sliceForChunk(nlpResult,
+                                        chunk.originalIndexStart(), chunk.originalIndexEnd());
+
                         ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
                                 chunk.text(), i, chunks.size(), false,
-                                nlpResult, chunk.originalIndexStart(), chunk.originalIndexEnd());
+                                nlpSlice, nlpResult,
+                                chunk.originalIndexStart(), chunk.originalIndexEnd());
 
-                        // Compute SHA-256 content hash
+                        // PR-K3 mirror: content_hash lives exclusively on the
+                        // typed ChunkAnalytics proto. The loose-map duplicate
+                        // that earlier branches wrote here is gone.
                         String contentHash = ChunkerSupport.sha256Hex(chunk.text());
-                        chunkMetadata.put("content_hash",
-                                com.google.protobuf.Value.newBuilder().setStringValue(contentHash).build());
+                        chunkAnalytics = chunkAnalytics.toBuilder()
+                                .setContentHash(contentHash)
+                                .build();
 
                         StreamChunksResponse.Builder responseBuilder = StreamChunksResponse.newBuilder()
                                 .setRequestId(requestId)
@@ -148,7 +159,6 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                                 .setChunkConfigId(chunkConfigId)
                                 .setSourceFieldName(effectiveSourceField)
                                 .setIsLast(isVeryLastChunk)
-                                .putAllMetadata(chunkMetadata)
                                 .setChunkAnalytics(chunkAnalytics);
 
                         // Populate document analytics on the last chunk of EACH config group
@@ -233,16 +243,19 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                     Chunk chunk = chunks.get(i);
                     boolean isLast = (i == chunks.size() - 1);
 
-                    // Extract metadata (legacy map) and typed analytics
-                    Map<String, com.google.protobuf.Value> chunkMetadata = metadataExtractor.extractAllMetadata(
-                            chunk.text(), i, chunks.size(), false);
+                    // Legacy path doesn't pre-compute NlpResult (no multi-config
+                    // fan-out to amortize it over), so extractChunkAnalytics runs
+                    // OpenNLP per chunk. That's existing behaviour — the PR-K3
+                    // cleanup just drops the loose-map writes.
                     ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
                             chunk.text(), i, chunks.size(), false);
 
-                    // Compute SHA-256 content hash of the chunk text
+                    // PR-K3 mirror: content_hash lives exclusively on the typed
+                    // ChunkAnalytics proto. No loose-map duplicate.
                     String contentHash = ChunkerSupport.sha256Hex(chunk.text());
-                    chunkMetadata.put("content_hash",
-                            com.google.protobuf.Value.newBuilder().setStringValue(contentHash).build());
+                    chunkAnalytics = chunkAnalytics.toBuilder()
+                            .setContentHash(contentHash)
+                            .build();
 
                     StreamChunksResponse.Builder responseBuilder = StreamChunksResponse.newBuilder()
                             .setRequestId(requestId)
@@ -255,7 +268,6 @@ public class ChunkerStreamingGrpcImpl implements SemanticChunkerService {
                             .setChunkConfigId(chunkConfigId)
                             .setSourceFieldName(effectiveSourceField)
                             .setIsLast(isLast)
-                            .putAllMetadata(chunkMetadata)
                             .setChunkAnalytics(chunkAnalytics);
 
                     // Populate document analytics and total_chunks on the last chunk only
