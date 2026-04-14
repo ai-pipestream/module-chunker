@@ -43,6 +43,15 @@ public class OverlapChunker {
     private static final String URL_PLACEHOLDER_PREFIX = "__URL_PLACEHOLDER_";
     private static final String URL_PLACEHOLDER_SUFFIX = "__";
 
+    /**
+     * Pre-compiled regex matching the URL placeholder format used by
+     * {@link #transformURLsToPlaceholders}. Used in the single-pass
+     * {@link #restorePlaceholdersInChunk} rewrite (PR-H mechanical perf).
+     * Format: {@code __URL_PLACEHOLDER_<digits>__}.
+     */
+    private static final Pattern URL_PLACEHOLDER_REGEX =
+            Pattern.compile(Pattern.quote(URL_PLACEHOLDER_PREFIX) + "\\d+" + Pattern.quote(URL_PLACEHOLDER_SUFFIX));
+
     @Inject
     public OverlapChunker(Tokenizer tokenizer, SentenceDetector sentenceDetector) {
         this.tokenizer = tokenizer;
@@ -154,7 +163,21 @@ public class OverlapChunker {
 
     /**
      * Restores URL placeholders in a chunk back to their original URLs.
-     * 
+     *
+     * <p>PR-H rewrite: single-pass with a pre-compiled regex (matched against
+     * {@link #URL_PLACEHOLDER_REGEX}). Replaces the legacy O(M × N × chunkLen)
+     * loop that called {@code String.replaceAll(Pattern.quote(...))} once per
+     * placeholder in the doc-level map, even for placeholders that didn't
+     * appear in this chunk. The legacy pattern compiled a throwaway regex
+     * per iteration AND walked the chunk text M times.
+     *
+     * <p>New cost model: ONE walk through chunkText via {@link Matcher#find()}
+     * + N {@link Matcher#appendReplacement} calls where N is the number of
+     * placeholders that ACTUALLY appear in this chunk (typically 0-2 for
+     * court opinions). If the chunk has zero placeholders, the early-exit
+     * after the first {@code find()} returns {@code chunkText} unchanged
+     * with no allocation.
+     *
      * @param chunkText Chunk text with placeholders
      * @param placeholderToUrlMap Map of placeholder-to-URL mappings
      * @return Chunk text with original URLs restored
@@ -163,11 +186,23 @@ public class OverlapChunker {
         if (chunkText == null || chunkText.isEmpty() || placeholderToUrlMap.isEmpty()) {
             return chunkText;
         }
-        String restoredText = chunkText;
-        for (Map.Entry<String, String> entry : placeholderToUrlMap.entrySet()) {
-            restoredText = restoredText.replaceAll(Pattern.quote(entry.getKey()), Matcher.quoteReplacement(entry.getValue()));
+        Matcher m = URL_PLACEHOLDER_REGEX.matcher(chunkText);
+        if (!m.find()) {
+            // Common case for chunks with no URLs: zero allocations.
+            return chunkText;
         }
-        return restoredText;
+        StringBuilder sb = new StringBuilder(chunkText.length());
+        do {
+            String placeholder = m.group();
+            String original = placeholderToUrlMap.get(placeholder);
+            // If the placeholder isn't in the map (shouldn't happen, but be
+            // defensive against partial state), keep the placeholder text
+            // as-is so we don't silently corrupt the chunk.
+            String replacement = (original != null) ? original : placeholder;
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+        } while (m.find());
+        m.appendTail(sb);
+        return sb.toString();
     }
 
     /**
