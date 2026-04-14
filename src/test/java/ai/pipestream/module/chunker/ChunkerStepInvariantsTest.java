@@ -52,7 +52,7 @@ class ChunkerStepInvariantsTest {
             "with a VectorSetDirectives-based flow per DESIGN.md §7.1. " +
             "This test validates that the output doc satisfies all post-chunker invariants. " +
             "We include enough sentences here for the NLP preprocessor to produce real results " +
-            "and for the sentence-level SPR to be populated when always_emit_sentences is true. " +
+            "and for the sentence-level SPR to be populated unconditionally per §21.9. " +
             "The chunker must produce deterministic chunk IDs, empty embedding_config_id, " +
             "non-empty source_field_analytics, and a directive_key in every SPR's metadata map.";
 
@@ -440,6 +440,13 @@ class ChunkerStepInvariantsTest {
                 assertThat(chunk.getChunkId())
                         .as(chunkCtx + ": chunk_id must be non-empty")
                         .isNotEmpty();
+
+                // §4.1: chunk_analytics is ALWAYS populated. The streaming path has
+                // done this for years; the non-streaming rewrite must match or
+                // downstream consumers lose the positional/POS/text-stats analytics.
+                assertThat(chunk.hasChunkAnalytics())
+                        .as(chunkCtx + ": chunk_analytics must be set (§4.1 always populated)")
+                        .isTrue();
 
                 int start = ei.hasOriginalCharStartOffset() ? ei.getOriginalCharStartOffset() : 0;
                 int end = ei.hasOriginalCharEndOffset() ? ei.getOriginalCharEndOffset() : 0;

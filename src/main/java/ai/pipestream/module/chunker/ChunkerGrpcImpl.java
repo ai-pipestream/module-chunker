@@ -62,8 +62,10 @@ import java.util.Set;
  *   <li>For each directive and each {@link NamedChunkerConfig} on that directive, runs
  *       the chunking pipeline (Redis cache → OverlapChunker → cache writeback) and
  *       builds one {@link SemanticProcessingResult} with deterministic IDs (§21.5).</li>
- *   <li>Optionally emits a {@code sentences_internal} SPR when
- *       {@link ChunkerStepOptions#effectiveAlwaysEmitSentences()} is {@code true} (§21.9).</li>
+ *   <li>Always emits a {@code sentences_internal} SPR per directive (§21.9 —
+ *       "no opt-out knob"; the corresponding {@code always_emit_sentences} field
+ *       on {@link ChunkerStepOptions} is retained for JSON back-compat but
+ *       deliberately not consulted here).</li>
  *   <li>Builds {@code source_field_analytics[]} for every unique
  *       {@code (source_field, chunk_config_id)} pair (§5.1).</li>
  *   <li>Sorts {@code semantic_results[]} deterministically by
@@ -158,10 +160,9 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     try {
                         String jsonStr = JsonFormat.printer().print(jsonConfig);
                         options = objectMapper.readValue(jsonStr, ChunkerStepOptions.class);
-                        LOG.debugf("Parsed ChunkerStepOptions: cacheEnabled=%b ttlSeconds=%d alwaysEmitSentences=%b",
+                        LOG.debugf("Parsed ChunkerStepOptions: cacheEnabled=%b ttlSeconds=%d (always_emit_sentences is ignored per §21.9)",
                                 options.effectiveCacheEnabled(),
-                                options.effectiveCacheTtlSeconds(),
-                                options.effectiveAlwaysEmitSentences());
+                                options.effectiveCacheTtlSeconds());
                     } catch (Exception e) {
                         String msg = "Invalid ChunkerStepOptions JSON: " + e.getMessage();
                         LOG.errorf("INVALID_ARGUMENT: %s", msg);
@@ -247,8 +248,16 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
                 // ----------------------------------------------------------------
                 // Step 6: Always-emit sentences_internal SPR (§21.9)
+                //
+                // §21.9 is explicit: "No opt-out knob in chunker/embedder/semantic-graph
+                // for sentence emission." The ChunkerStepOptions.always_emit_sentences
+                // field is retained in the record for JSON-config back-compat but is
+                // deliberately NOT consulted here — sentences_internal is always emitted
+                // regardless of what the caller puts in the options JSON. Whether the
+                // sink indexes the sentence chunks is a sink-side toggle per §21.9,
+                // not a chunker concern.
                 // ----------------------------------------------------------------
-                if (options.effectiveAlwaysEmitSentences()) {
+                {
                     // Only emit if no directive config already produces sentence-level chunks
                     boolean alreadyHasSentenceSpr = outputSprs.stream()
                             .anyMatch(spr -> SENTENCES_INTERNAL_CONFIG_ID.equals(spr.getChunkConfigId()));
@@ -458,6 +467,12 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 Map<String, Value> extractedMetadata = metadataExtractor.extractAllMetadata(
                         sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder);
 
+                // §4.1: chunk_analytics is ALWAYS populated. The streaming impl at
+                // ChunkerStreamingGrpcImpl already does this; the non-streaming
+                // rewrite must match so the output passes assertPostChunker.
+                ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
+                        sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder);
+
                 ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
                         .setTextContent(sanitizedText)
                         .setChunkId(chunkId)
@@ -471,6 +486,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                         .setChunkId(chunkId)
                         .setChunkNumber(chunkNumber)
                         .setEmbeddingInfo(embedding)
+                        .setChunkAnalytics(chunkAnalytics)
                         .putAllMetadata(extractedMetadata)
                         .build();
 
@@ -543,6 +559,10 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
             String sanitizedText = UnicodeSanitizer.sanitizeInvalidUnicode(sentText);
 
+            // §4.1: chunk_analytics is ALWAYS populated, including on sentences_internal chunks.
+            ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
+                    sanitizedText, i, sentences.length, false);
+
             ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
                     .setTextContent(sanitizedText)
                     .setChunkId(chunkId)
@@ -556,6 +576,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     .setChunkId(chunkId)
                     .setChunkNumber(i)
                     .setEmbeddingInfo(embedding)
+                    .setChunkAnalytics(chunkAnalytics)
                     .build();
 
             result.add(chunk);
