@@ -27,15 +27,26 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Contract-lock test for the directive-driven {@code ChunkerGrpcImpl.processData}
  * rewrite (R1-pack-2, DESIGN.md §7.1).
  *
- * <p>This test verifies all post-chunker invariants from DESIGN.md §5.1 inline
- * (rather than via {@code SemanticPipelineInvariants.assertPostChunker}) to work
- * around Quarkus classloader isolation that prevents calling a static helper loaded
- * from a file-dep jar when the helper references proto classes from the application
- * classloader.
+ * <p>Verifies post-chunker invariants from DESIGN.md §5.1 via a private inline
+ * helper ({@link #assertPostChunkerInvariants(PipeDoc)}). The invariants are
+ * NOT shared across consumers via a library — each module in the three-step
+ * semantic pipeline owns its own inline copy of its stage's assertions.
+ *
+ * <p><b>Why inline per consumer:</b> a shared-library approach (e.g. a
+ * {@code SemanticPipelineInvariants} class in {@code pipestream-test-support})
+ * would require the library to compile against proto types like {@code PipeDoc}.
+ * When the library is a Quarkus extension and the consumer also generates its
+ * own proto classes via the proto-toolchain plugin, Quarkus's extension-aware
+ * classloader bucketizes the two PipeDoc copies into separate views → a call
+ * from the consumer's classloader to the library's classloader throws
+ * {@link NoClassDefFoundError} on the first proto field access. The clean
+ * answer for microservices is to repeat the ~60 lines of structural checks
+ * per consumer. Drift is caught by the spec reviewer at PR time against
+ * DESIGN.md §5.1 (the authoritative spec).
  *
  * <p>All assertions use AssertJ with descriptive {@code .as()} messages per
  * {@code feedback-assertj-preference.md}. If any assertion fails, fix the
- * production code — not the test.
+ * production code — not this helper.
  */
 @QuarkusTest
 class ChunkerStepInvariantsTest {
@@ -381,15 +392,18 @@ class ChunkerStepInvariantsTest {
 
     // =========================================================================
     // Inline post-chunker invariants — mirrors DESIGN.md §5.1
-    // (Inlined to avoid Quarkus classloader isolation issue with file-dep jars)
+    //
+    // Owned by this test class (not shared via a library) because bundling a
+    // shared assertion helper that references PipeDoc into a Quarkus-extension
+    // jar creates a classloader hazard for every consumer that also generates
+    // its own proto classes. See the class Javadoc for the full rationale.
     // =========================================================================
 
     /**
      * Asserts that {@code doc} satisfies all post-chunker stage invariants per
-     * DESIGN.md §5.1. Mirrors {@code SemanticPipelineInvariants.assertPostChunker}
-     * but operates in the same classloader as the test proto classes.
-     *
-     * <p>Fix the production code, not this method, if any assertion fails.
+     * DESIGN.md §5.1. If any assertion fails, fix the production code — not
+     * this method. Spec reviewer verifies this helper against DESIGN.md §5.1
+     * at PR time.
      */
     private static void assertPostChunkerInvariants(PipeDoc doc) {
         assertThat(doc.hasSearchMetadata())
@@ -511,4 +525,5 @@ class ChunkerStepInvariantsTest {
                     .isLessThanOrEqualTo(0);
         }
     }
+
 }
