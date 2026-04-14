@@ -765,7 +765,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
         // Always inject source_label as the sourceField so the chunker reads the right field.
         // ChunkerConfig is immutable so we create a new one with the corrected sourceField.
-        return new ChunkerConfig(
+        ChunkerConfig resolved = new ChunkerConfig(
                 base.algorithm(),
                 sourceLabel,        // override: directive source_label wins
                 base.chunkSize(),
@@ -773,6 +773,30 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 base.preserveUrls(),
                 base.cleanText()
         );
+
+        // Enforce structural constraints via ChunkerConfig.validate(): chunkSize
+        // in [1, 10000], chunkOverlap in [0, 5000], chunkOverlap < chunkSize,
+        // algorithm != SEMANTIC (not implemented). Pre-R1 relied on the REST-
+        // layer JAX-RS @Min/@Max/@NotNull annotations, but the directive-driven
+        // path goes through a Struct parse that bypasses JAX-RS validation —
+        // so a caller could send {"chunkSize": 500, "chunkOverlap": 500} and
+        // get a degenerate chunker whose token window never advances
+        // (OverlapChunker clamps overlap at chunkSize-1 via
+        // Math.max(1, tokens - overlap) to prevent an infinite loop, but the
+        // output chunks are still unusable — pure overlap, zero novel tokens).
+        //
+        // Fail loud with IllegalArgumentException — the outer processData
+        // catch block converts this to PROCESSING_OUTCOME_FAILURE with an
+        // operator-visible log entry. Aligns with §21.1 no-silent-fallback.
+        String validationError = resolved.validate();
+        if (validationError != null) {
+            String msg = "Invalid NamedChunkerConfig '" + namedConfig.getConfigId()
+                    + "' for source_label='" + sourceLabel + "': " + validationError;
+            LOG.warnf("INVALID_ARGUMENT: %s", msg);
+            throw new IllegalArgumentException(msg);
+        }
+
+        return resolved;
     }
 
     /**
