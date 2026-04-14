@@ -1,5 +1,6 @@
 package ai.pipestream.module.chunker.config;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
@@ -31,9 +32,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record ChunkerStepOptions(
-        @JsonProperty("cache_enabled") Boolean cacheEnabled,
-        @JsonProperty("cache_ttl_seconds") Long cacheTtlSeconds,
-        @JsonProperty("always_emit_sentences") Boolean alwaysEmitSentences
+        @JsonProperty("cache_enabled") @JsonAlias("cacheEnabled") Boolean cacheEnabled,
+        @JsonProperty("cache_ttl_seconds") @JsonAlias("cacheTtlSeconds") Long cacheTtlSeconds,
+        @JsonProperty("always_emit_sentences") @JsonAlias("alwaysEmitSentences") Boolean alwaysEmitSentences
 ) {
 
     /** Default TTL for chunk cache entries: 30 days in seconds. */

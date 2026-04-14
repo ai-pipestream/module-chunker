@@ -74,15 +74,17 @@ public record ChunkerConfig(
     Integer chunkOverlap,
 
     @JsonProperty("preserveUrls")
+    @JsonAlias("preserve_urls")
     @Schema(
-        description = "Whether to preserve URLs as atomic units during chunking to maintain readability", 
+        description = "Whether to preserve URLs as atomic units during chunking to maintain readability",
         defaultValue = "true"
     )
     Boolean preserveUrls,
 
     @JsonProperty("cleanText")
+    @JsonAlias("clean_text")
     @Schema(
-        description = "Whether to clean text by normalizing whitespace and line endings before chunking", 
+        description = "Whether to clean text by normalizing whitespace and line endings before chunking",
         defaultValue = "true"
     )
     Boolean cleanText
