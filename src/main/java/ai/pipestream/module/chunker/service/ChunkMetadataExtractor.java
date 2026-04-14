@@ -158,6 +158,68 @@ public class ChunkMetadataExtractor {
     }
 
     /**
+     * Single-pass character statistics over a text region. Replaces five
+     * separate {@code chars().filter(...).count()} passes plus a sixth
+     * {@code toCharArray()} pass for punctuation that the legacy code did
+     * per metadata call. On a 200-chunk doc with both
+     * {@link #extractAllMetadata} and {@link #extractChunkAnalytics} called
+     * per chunk, that's 12 linear passes over chunk text per chunk; one
+     * fused loop drops it to 2.
+     *
+     * <p>Uses {@link String#charAt} directly which avoids the
+     * {@code IntStream} boxing overhead of the legacy
+     * {@code chars().filter(...).count()} pattern.
+     *
+     * <p>Counters semantics match the legacy code:
+     * <ul>
+     *   <li>{@code whitespace}: {@link Character#isWhitespace}</li>
+     *   <li>{@code alphanumeric}: {@link Character#isLetterOrDigit}</li>
+     *   <li>{@code digits}: {@link Character#isDigit} (subset of alphanumeric)</li>
+     *   <li>{@code uppercase}: {@link Character#isUpperCase} (subset of alphanumeric)</li>
+     *   <li>{@code punctuationCounts}: ASCII-printable chars (0x20-0x7E) that
+     *       are NOT whitespace and NOT letter-or-digit, keyed by the char</li>
+     * </ul>
+     */
+    private static final class CharStats {
+        long whitespace;
+        long alphanumeric;
+        long digits;
+        long uppercase;
+        final Map<Character, Integer> punctuationCounts = new HashMap<>();
+    }
+
+    /**
+     * Computes {@link CharStats} for {@code text} in a single pass.
+     */
+    private static CharStats computeCharStats(String text) {
+        CharStats stats = new CharStats();
+        if (text == null) return stats;
+        int len = text.length();
+        for (int i = 0; i < len; i++) {
+            char c = text.charAt(i);
+            if (Character.isWhitespace(c)) {
+                stats.whitespace++;
+                continue;
+            }
+            if (Character.isLetterOrDigit(c)) {
+                stats.alphanumeric++;
+                if (Character.isDigit(c)) stats.digits++;
+                if (Character.isUpperCase(c)) stats.uppercase++;
+                continue;
+            }
+            // Not whitespace, not letter-or-digit. ASCII-printable range
+            // (0x20-0x7E) excluding whitespace gives us punctuation. The
+            // legacy code used StringUtils.isAsciiPrintable(String.valueOf(c))
+            // which allocates a new String per char — direct range check
+            // avoids that allocation.
+            if (c >= 0x20 && c <= 0x7E) {
+                stats.punctuationCounts.merge(c, 1, Integer::sum);
+            }
+        }
+        return stats;
+    }
+
+    /**
      * Extracts comprehensive metadata from a text chunk.
      *
      * <p>Convenience overload that runs {@link #safeSentDetect} and
@@ -246,24 +308,19 @@ public class ChunkMetadataExtractor {
             metadataMap.put("vocabulary_density", Value.newBuilder().setNumberValue(0).build());
         }
 
-        long whitespaceChars = chunkText.chars().filter(Character::isWhitespace).count();
-        long alphanumericChars = chunkText.chars().filter(Character::isLetterOrDigit).count();
-        long digitChars = chunkText.chars().filter(Character::isDigit).count();
-        long uppercaseChars = chunkText.chars().filter(Character::isUpperCase).count();
+        // PR-H: single fused pass over chunkText for all 5 char-class counters
+        // (whitespace, alphanumeric, digits, uppercase, punctuation) instead
+        // of 5 separate chars().filter().count() calls + a 6th toCharArray()
+        // loop. ~6x reduction in linear scans of chunk text per call.
+        CharStats charStats = computeCharStats(chunkText);
 
-        metadataMap.put("whitespace_percentage", Value.newBuilder().setNumberValue(characterCount > 0 ? Double.parseDouble(DECIMAL_FORMAT.format((double) whitespaceChars / characterCount)) : 0).build());
-        metadataMap.put("alphanumeric_percentage", Value.newBuilder().setNumberValue(characterCount > 0 ? Double.parseDouble(DECIMAL_FORMAT.format((double) alphanumericChars / characterCount)) : 0).build());
-        metadataMap.put("digit_percentage", Value.newBuilder().setNumberValue(characterCount > 0 ? Double.parseDouble(DECIMAL_FORMAT.format((double) digitChars / characterCount)) : 0).build());
-        metadataMap.put("uppercase_percentage", Value.newBuilder().setNumberValue(characterCount > 0 ? Double.parseDouble(DECIMAL_FORMAT.format((double) uppercaseChars / characterCount)) : 0).build());
+        metadataMap.put("whitespace_percentage", Value.newBuilder().setNumberValue(characterCount > 0 ? Double.parseDouble(DECIMAL_FORMAT.format((double) charStats.whitespace / characterCount)) : 0).build());
+        metadataMap.put("alphanumeric_percentage", Value.newBuilder().setNumberValue(characterCount > 0 ? Double.parseDouble(DECIMAL_FORMAT.format((double) charStats.alphanumeric / characterCount)) : 0).build());
+        metadataMap.put("digit_percentage", Value.newBuilder().setNumberValue(characterCount > 0 ? Double.parseDouble(DECIMAL_FORMAT.format((double) charStats.digits / characterCount)) : 0).build());
+        metadataMap.put("uppercase_percentage", Value.newBuilder().setNumberValue(characterCount > 0 ? Double.parseDouble(DECIMAL_FORMAT.format((double) charStats.uppercase / characterCount)) : 0).build());
 
         Struct.Builder punctuationStruct = Struct.newBuilder();
-        Map<Character, Integer> puncCounts = new HashMap<>();
-        for (char c : chunkText.toCharArray()) {
-            if (StringUtils.isAsciiPrintable(String.valueOf(c)) && !Character.isLetterOrDigit(c) && !Character.isWhitespace(c)) {
-                puncCounts.put(c, puncCounts.getOrDefault(c, 0) + 1);
-            }
-        }
-        for (Map.Entry<Character, Integer> entry : puncCounts.entrySet()) {
+        for (Map.Entry<Character, Integer> entry : charStats.punctuationCounts.entrySet()) {
             punctuationStruct.putFields(String.valueOf(entry.getKey()), Value.newBuilder().setNumberValue(entry.getValue()).build());
         }
         metadataMap.put("punctuation_counts", Value.newBuilder().setStructValue(punctuationStruct).build());
@@ -358,23 +415,16 @@ public class ChunkMetadataExtractor {
             builder.setAverageSentenceLength((float) wordCount / sentenceCount);
         }
 
-        long whitespace = chunkText.chars().filter(Character::isWhitespace).count();
-        long alphanumeric = chunkText.chars().filter(Character::isLetterOrDigit).count();
-        long digits = chunkText.chars().filter(Character::isDigit).count();
-        long uppercase = chunkText.chars().filter(Character::isUpperCase).count();
+        // PR-H: single fused pass over chunkText for all 5 char-class counters
+        // (whitespace, alphanumeric, digits, uppercase, punctuation).
+        CharStats charStats = computeCharStats(chunkText);
 
-        builder.setWhitespacePercentage(characterCount > 0 ? (float) whitespace / characterCount : 0)
-                .setAlphanumericPercentage(characterCount > 0 ? (float) alphanumeric / characterCount : 0)
-                .setDigitPercentage(characterCount > 0 ? (float) digits / characterCount : 0)
-                .setUppercasePercentage(characterCount > 0 ? (float) uppercase / characterCount : 0);
+        builder.setWhitespacePercentage(characterCount > 0 ? (float) charStats.whitespace / characterCount : 0)
+                .setAlphanumericPercentage(characterCount > 0 ? (float) charStats.alphanumeric / characterCount : 0)
+                .setDigitPercentage(characterCount > 0 ? (float) charStats.digits / characterCount : 0)
+                .setUppercasePercentage(characterCount > 0 ? (float) charStats.uppercase / characterCount : 0);
 
-        Map<Character, Integer> puncCounts = new HashMap<>();
-        for (char c : chunkText.toCharArray()) {
-            if (StringUtils.isAsciiPrintable(String.valueOf(c)) && !Character.isLetterOrDigit(c) && !Character.isWhitespace(c)) {
-                puncCounts.merge(c, 1, Integer::sum);
-            }
-        }
-        for (Map.Entry<Character, Integer> entry : puncCounts.entrySet()) {
+        for (Map.Entry<Character, Integer> entry : charStats.punctuationCounts.entrySet()) {
             builder.putPunctuationCounts(String.valueOf(entry.getKey()), entry.getValue());
         }
 
@@ -421,23 +471,18 @@ public class ChunkMetadataExtractor {
             builder.setAverageSentenceLength((float) wordCount / sentenceCount);
         }
 
-        long whitespace = fullText.chars().filter(Character::isWhitespace).count();
-        long alphanumeric = fullText.chars().filter(Character::isLetterOrDigit).count();
-        long digits = fullText.chars().filter(Character::isDigit).count();
-        long uppercase = fullText.chars().filter(Character::isUpperCase).count();
+        // PR-H: single fused pass — same fix as the chunk-level metadata
+        // methods. extractDocumentAnalytics runs once per source_label per
+        // request so the win here is small per call, but it adds up on
+        // multi-directive requests with large source texts.
+        CharStats charStats = computeCharStats(fullText);
 
-        builder.setWhitespacePercentage(characterCount > 0 ? (float) whitespace / characterCount : 0)
-                .setAlphanumericPercentage(characterCount > 0 ? (float) alphanumeric / characterCount : 0)
-                .setDigitPercentage(characterCount > 0 ? (float) digits / characterCount : 0)
-                .setUppercasePercentage(characterCount > 0 ? (float) uppercase / characterCount : 0);
+        builder.setWhitespacePercentage(characterCount > 0 ? (float) charStats.whitespace / characterCount : 0)
+                .setAlphanumericPercentage(characterCount > 0 ? (float) charStats.alphanumeric / characterCount : 0)
+                .setDigitPercentage(characterCount > 0 ? (float) charStats.digits / characterCount : 0)
+                .setUppercasePercentage(characterCount > 0 ? (float) charStats.uppercase / characterCount : 0);
 
-        Map<Character, Integer> puncCounts = new HashMap<>();
-        for (char c : fullText.toCharArray()) {
-            if (StringUtils.isAsciiPrintable(String.valueOf(c)) && !Character.isLetterOrDigit(c) && !Character.isWhitespace(c)) {
-                puncCounts.merge(c, 1, Integer::sum);
-            }
-        }
-        for (Map.Entry<Character, Integer> entry : puncCounts.entrySet()) {
+        for (Map.Entry<Character, Integer> entry : charStats.punctuationCounts.entrySet()) {
             builder.putPunctuationCounts(String.valueOf(entry.getKey()), entry.getValue());
         }
 

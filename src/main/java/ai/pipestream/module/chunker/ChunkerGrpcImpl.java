@@ -230,6 +230,15 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 // recompute for each chunker config on the same directive.
                 Map<String, DocumentAnalytics> docAnalyticsBySourceLabel = new LinkedHashMap<>();
 
+                // PR-H: per-directive resolution cache (sourceText, nlpResult,
+                // directiveKey). Built in Step 4, reused in Step 6 so that
+                // sentences_internal emission doesn't have to re-call
+                // extractSourceText() and re-look-up the NLP cache. Pre-PR-H
+                // Step 6 duplicated three lookups per directive that Step 4
+                // had already performed. LinkedHashMap so directive iteration
+                // order is preserved across the two steps.
+                Map<VectorDirective, ResolvedDirective> resolvedDirectives = new LinkedHashMap<>();
+
                 for (VectorDirective directive : directives) {
                     String sourceLabel = directive.getSourceLabel();
                     String sourceText = extractSourceText(inputDoc, directive);
@@ -258,6 +267,11 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
                     String directiveKey = directiveKeys.get(directive);
 
+                    // Cache the resolution so Step 6 can reuse it without
+                    // re-extracting source text or re-looking-up the NLP cache.
+                    resolvedDirectives.put(directive,
+                            new ResolvedDirective(sourceText, nlpResult, directiveKey));
+
                     for (NamedChunkerConfig namedConfig : directive.getChunkerConfigsList()) {
                         SemanticProcessingResult spr = processOneDirectiveConfig(
                                 inputDoc, docHash, sourceText, nlpResult,
@@ -284,16 +298,20 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                             .anyMatch(spr -> SENTENCES_INTERNAL_CONFIG_ID.equals(spr.getChunkConfigId()));
 
                     if (!alreadyHasSentenceSpr) {
-                        for (VectorDirective directive : directives) {
+                        // PR-H: iterate the resolvedDirectives cache from
+                        // Step 4 instead of re-calling extractSourceText() +
+                        // nlpByText.get() + directiveKeys.get() for every
+                        // directive. Pre-PR-H Step 6 was duplicating three
+                        // lookups per directive; the cache makes Step 6 a
+                        // simple iteration over data we already have.
+                        for (Map.Entry<VectorDirective, ResolvedDirective> entry : resolvedDirectives.entrySet()) {
+                            VectorDirective directive = entry.getKey();
+                            ResolvedDirective resolved = entry.getValue();
                             String sourceLabel = directive.getSourceLabel();
-                            String sourceText = extractSourceText(inputDoc, directive);
-                            if (sourceText == null || sourceText.isEmpty()) continue;
-
-                            NlpPreprocessor.NlpResult nlpResult = nlpByText.get(sourceText);
-                            if (nlpResult == null) continue;
+                            NlpPreprocessor.NlpResult nlpResult = resolved.nlpResult();
 
                             NlpDocumentAnalysis nlpAnalysis = buildNlpAnalysis(nlpResult);
-                            String directiveKey = directiveKeys.get(directive);
+                            String directiveKey = resolved.directiveKey();
                             List<SemanticChunk> sentenceChunks = buildSentenceChunks(
                                     docHash, sourceLabel, SENTENCES_INTERNAL_CONFIG_ID, nlpResult);
 
@@ -877,6 +895,24 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 .setModule(ModuleLogOrigin.newBuilder().setModuleName("chunker").build())
                 .build();
     }
+
+    /**
+     * Per-directive resolution cached during Step 4 (NLP / chunker loop) so
+     * Step 6 (always-emit sentences_internal) can reuse the source text,
+     * NLP result, and directive key without re-extracting them. Pre-PR-H
+     * Step 6 re-called {@code extractSourceText()},
+     * {@code nlpByText.get()}, and {@code directiveKeys.get()} for every
+     * directive on every request — pure waste because Step 4 had already
+     * computed them.
+     *
+     * <p>Cached only for directives that actually had non-empty source
+     * text in Step 4 (skipped directives don't enter the cache).
+     */
+    private record ResolvedDirective(
+            String sourceText,
+            NlpPreprocessor.NlpResult nlpResult,
+            String directiveKey
+    ) {}
 
     /**
      * Computes the SHA-256 hash of the given text and returns it as a lowercase
