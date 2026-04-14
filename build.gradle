@@ -89,6 +89,10 @@ dependencies {
     testImplementation 'io.quarkus:quarkus-junit5-mockito'
     testImplementation 'io.rest-assured:rest-assured'
     testImplementation 'com.networknt:json-schema-validator:3.0.1'
+    // Stage invariants for assertPostChunker contract-lock test (R1-pack-2).
+    // Added as a direct file dep to bypass Quarkus extension augmentation
+    // (the runtime jar has no CDI or extension annotations; only assertj + protos).
+    testImplementation files('/work/core-services/pipestream-platform/pipestream-test-support/runtime/build/libs/pipestream-test-support-0.7.24-SNAPSHOT.jar')
 
     runtimeOnly libs.quarkus.logging.manager
 }
