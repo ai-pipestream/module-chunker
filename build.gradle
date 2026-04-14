@@ -56,6 +56,13 @@ dependencies {
     implementation 'io.quarkus:quarkus-cache'
     implementation 'io.quarkus:quarkus-redis-client'
     implementation 'io.quarkus:quarkus-micrometer'
+    // Concrete MeterRegistry implementation — required for ChunkCacheService's
+    // @Inject MeterRegistry to resolve. The umbrella quarkus-micrometer artifact
+    // only provides the API; without a registry extension on the classpath,
+    // ArC augmentation fails with "Unsatisfied dependency for type MeterRegistry"
+    // in clean-classpath environments (CI). Every other Pipestream module that
+    // injects MeterRegistry adds this same dep.
+    implementation 'io.quarkus:quarkus-micrometer-registry-prometheus'
     implementation 'io.quarkus:quarkus-container-image-docker'
 
     // Service Discovery dependencies for Consul
