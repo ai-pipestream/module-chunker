@@ -134,7 +134,8 @@ public class SimpleDoubleChunkingTest {
     }
 
     private void saveDoubleChunkedDocument(PipeDoc doc) throws IOException {
-        Path outputDir = Paths.get("modules/chunker/src/test/resources/double_chunked_pipedocs");
+        // Write debug snapshot under build/tmp so it doesn't pollute git status.
+        Path outputDir = Paths.get(System.getProperty("user.dir"), "build", "tmp", "double_chunked_pipedocs");
         Files.createDirectories(outputDir);
 
         Path outputFile = outputDir.resolve("simple_double_chunked_001.pb");

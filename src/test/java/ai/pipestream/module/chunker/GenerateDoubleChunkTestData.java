@@ -68,9 +68,11 @@ public class GenerateDoubleChunkTestData {
         }
         log.info("Second chunking completed");
 
-        // Save the result with absolute path
+        // Save debug snapshot under build/tmp so it doesn't pollute git status.
+        // Was previously written into src/test/resources, which caused fixture churn
+        // on every run because the chunker output bytes are not deterministic across runs.
         String projectRoot = System.getProperty("user.dir");
-        Path outputDir = Paths.get(projectRoot, "src", "test", "resources", "double_chunked_pipedocs");
+        Path outputDir = Paths.get(projectRoot, "build", "tmp", "double_chunked_pipedocs");
         Files.createDirectories(outputDir);
 
         Path outputFile = outputDir.resolve("test_double_chunked_001.pb");
