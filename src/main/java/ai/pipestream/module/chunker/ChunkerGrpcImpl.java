@@ -552,29 +552,14 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                         && !placeholderToUrlMap.isEmpty()
                         && placeholderToUrlMap.keySet().stream().anyMatch(ph -> c.text().contains(ph));
 
-                // PR-I: compute the NLP slice ONCE per chunk and reuse it for
-                // both extractAllMetadata and extractChunkAnalytics. If
-                // nlpForSlicing is null (URL substitution invalidated offsets
-                // for this whole pass) sliceForChunk returns null and both
-                // metadata methods fall back to running OpenNLP per chunk.
+                // PR-I: compute the NLP slice ONCE per chunk so extractChunkAnalytics
+                // doesn't re-run OpenNLP on the chunk text. If nlpForSlicing is
+                // null (URL substitution invalidated offsets for this whole
+                // pass) sliceForChunk returns null and the metadata methods
+                // fall back to running OpenNLP per chunk.
                 ChunkMetadataExtractor.ChunkNlpSlice nlpSlice =
                         metadataExtractor.sliceForChunk(nlpForSlicing,
                                 c.originalIndexStart(), c.originalIndexEnd());
-
-                Map<String, Value> extractedMetadata = metadataExtractor.extractAllMetadata(
-                        sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder, nlpSlice);
-
-                // §9 dedup groundwork: SHA-256 content_hash of the sanitised
-                // chunk text, stamped into the chunk metadata map. Identical
-                // sanitised text → identical hash, so reprocessing can skip
-                // already-computed chunks, downstream embedders can use the
-                // hash as a cache key, and a future OpenVINO chunker backend
-                // can be byte-verified against this implementation via hash
-                // equality on the same input. Same scheme the streaming impl
-                // uses at ChunkerStreamingGrpcImpl.java:139-141.
-                String contentHash = ChunkerSupport.sha256Hex(sanitizedText);
-                extractedMetadata.put("content_hash",
-                        Value.newBuilder().setStringValue(contentHash).build());
 
                 // §4.1: chunk_analytics is ALWAYS populated. The streaming impl at
                 // ChunkerStreamingGrpcImpl already does this; the non-streaming
@@ -590,11 +575,10 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                         nlpSlice, nlpForSlicing,
                         c.originalIndexStart(), c.originalIndexEnd());
 
-                // PR-K2: promote content_hash to the typed ChunkAnalytics field
-                // (pipestream-protos PR #38 added the field). Keeps the loose-
-                // map "content_hash" entry above intact for backward compat —
-                // the duplication will be removed in a follow-up PR after a
-                // consumer audit confirms no readers depend on the loose key.
+                // PR-K2 promoted content_hash to the typed ChunkAnalytics field.
+                // PR-K3 removed the duplicate write to the loose metadata map —
+                // chunk_analytics.content_hash is now the canonical home.
+                String contentHash = ChunkerSupport.sha256Hex(sanitizedText);
                 chunkAnalytics = chunkAnalytics.toBuilder()
                         .setContentHash(contentHash)
                         .build();
@@ -608,12 +592,17 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                         // vector intentionally NOT set — stage-1 placeholder (§4.1)
                         .build();
 
+                // PR-K3: SemanticChunk.metadata is no longer populated by the
+                // chunker. All 17 fields it used to hold (word_count,
+                // character_count, is_first_chunk, etc.) PLUS content_hash
+                // now live exclusively on the typed ChunkAnalytics proto.
+                // The loose map remains as an extension point for future
+                // caller-injected metadata that doesn't fit the typed schema.
                 SemanticChunk semanticChunk = SemanticChunk.newBuilder()
                         .setChunkId(chunkId)
                         .setChunkNumber(chunkNumber)
                         .setEmbeddingInfo(embedding)
                         .setChunkAnalytics(chunkAnalytics)
-                        .putAllMetadata(extractedMetadata)
                         .build();
 
                 chunks.add(semanticChunk);
@@ -689,29 +678,10 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             // nlpResult is ALWAYS safe to slice here (no URL substitution
             // happens on this code path — sentences come straight from the
             // NLP run on the unmodified source text). Compute the slice
-            // ONCE per sentence and pass it to both metadata methods so we
-            // never re-run OpenNLP on individual sentence chunks.
+            // ONCE per sentence so extractChunkAnalytics doesn't re-run
+            // OpenNLP on individual sentence chunks.
             ChunkMetadataExtractor.ChunkNlpSlice nlpSlice =
                     metadataExtractor.sliceForChunk(nlpResult, start, end);
-
-            // Legacy string-keyed metadata map — Path A populates it at
-            // processOneDirectiveConfig, so Path B must too or downstream
-            // consumers that read from SemanticChunk.metadata silently get
-            // empty data on every sentence chunk. containsUrlPlaceholder=false
-            // because Path B walks raw NLP sentence spans and never runs the
-            // URL substitute/restore pipeline — any URL in sanitizedText is
-            // a real URL, not a placeholder.
-            Map<String, Value> extractedMetadata = metadataExtractor.extractAllMetadata(
-                    sanitizedText, i, sentences.length, false, nlpSlice);
-
-            // §9 dedup groundwork: SHA-256 content_hash of the sanitised
-            // sentence text, stamped into the chunk metadata map. Same
-            // scheme and key name as Path A so downstream dedup logic can
-            // work uniformly across both paths. Identical sentences across
-            // docs → identical hash → dedup candidate.
-            String contentHash = ChunkerSupport.sha256Hex(sanitizedText);
-            extractedMetadata.put("content_hash",
-                    Value.newBuilder().setStringValue(contentHash).build());
 
             // §4.1: chunk_analytics is ALWAYS populated, including on sentences_internal chunks.
             // 8-arg overload uses the pre-computed slice for base text stats
@@ -722,9 +692,9 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     sanitizedText, i, sentences.length, false,
                     nlpSlice, nlpResult, start, end);
 
-            // PR-K2: promote content_hash to the typed ChunkAnalytics field.
-            // Same pattern as Path A — keeps the loose-map entry for
-            // backward compat and adds the typed field as canonical.
+            // PR-K2 promoted content_hash to the typed ChunkAnalytics field.
+            // PR-K3 removed the duplicate write to the loose metadata map.
+            String contentHash = ChunkerSupport.sha256Hex(sanitizedText);
             chunkAnalytics = chunkAnalytics.toBuilder()
                     .setContentHash(contentHash)
                     .build();
@@ -738,12 +708,13 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     // vector intentionally NOT set — stage-1 placeholder
                     .build();
 
+            // PR-K3: SemanticChunk.metadata not populated. All fields it
+            // used to hold now live exclusively on chunk_analytics.
             SemanticChunk chunk = SemanticChunk.newBuilder()
                     .setChunkId(chunkId)
                     .setChunkNumber(i)
                     .setEmbeddingInfo(embedding)
                     .setChunkAnalytics(chunkAnalytics)
-                    .putAllMetadata(extractedMetadata)
                     .build();
 
             result.add(chunk);

@@ -13,7 +13,6 @@ import ai.pipestream.data.v1.SemanticChunk;
 import ai.pipestream.data.v1.SemanticProcessingResult;
 import ai.pipestream.data.v1.VectorSetDirectives;
 import com.google.protobuf.Struct;
-import com.google.protobuf.Value;
 import io.quarkus.grpc.GrpcClient;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
@@ -64,7 +63,14 @@ class ChunkerTypedAnalyticsFieldsTest {
             + "in tail latency and a substantial improvement in throughput.";
 
     @Test
-    void typedContentHashShouldBePopulatedAndMatchLooseMap() {
+    void typedContentHashShouldBePopulatedAndLooseMapEntryGone() {
+        // PR-K2 added the typed field; this test originally also asserted
+        // the loose-map "content_hash" entry was still present (additive
+        // landing window). PR-K3 closed that window — this test now
+        // asserts the typed field is populated AND the loose-map entry
+        // is GONE. Any future regression that re-introduces the loose-map
+        // duplicate (e.g. someone copy-pasting from the streaming impl)
+        // lights this up.
         VectorSetDirectives directives = TestDirectiveBuilder.withSingleTokenDirective("body", 500, 50);
 
         PipeDoc inputDoc = PipeDoc.newBuilder()
@@ -97,22 +103,13 @@ class ChunkerTypedAnalyticsFieldsTest {
                                 chunkCtx)
                         .matches("^[0-9a-f]{64}$");
 
-                // Loose-map entry must STILL be present (additive landing) and
-                // byte-equivalent to the typed field. After the consumer audit
-                // a follow-up PR will remove this duplication.
-                Value looseHashVal = chunk.getMetadataMap().get("content_hash");
-                assertThat(looseHashVal)
-                        .as("%s: loose-map content_hash entry must still exist "
-                                + "during the additive landing window", chunkCtx)
-                        .isNotNull();
-
-                assertThat(looseHashVal.getStringValue())
-                        .as("%s: typed and loose-map content_hash must agree "
-                                + "byte-for-byte during the additive window — "
-                                + "any drift means the producer is computing "
-                                + "two different hashes for the same text",
-                                chunkCtx)
-                        .isEqualTo(typedHash);
+                // PR-K3: loose-map "content_hash" entry must be GONE.
+                assertThat(chunk.getMetadataMap())
+                        .as("%s: SemanticChunk.metadata must NOT contain a "
+                                + "loose 'content_hash' key — PR-K3 removed "
+                                + "the duplicate; chunk_analytics.content_hash "
+                                + "is the canonical and only home", chunkCtx)
+                        .doesNotContainKey("content_hash");
             }
         }
 
@@ -275,6 +272,16 @@ class ChunkerTypedAnalyticsFieldsTest {
     }
 
     private ProcessDataResponse runProcessData(PipeDoc doc, String streamIdPrefix) {
+        // PR-K3: disable the chunk cache so each test run computes from
+        // scratch. The cache key is (sourceText, chunkerConfigId), and
+        // POS_RICH_BODY is a constant — without this, an entry written by
+        // an earlier test run (or an earlier branch's code) shadows the
+        // current code path's output.
+        Struct cacheDisabledConfig = Struct.newBuilder()
+                .putFields("cache_enabled",
+                        com.google.protobuf.Value.newBuilder().setBoolValue(false).build())
+                .build();
+
         ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(doc)
                 .setMetadata(ServiceMetadata.newBuilder()
@@ -284,7 +291,7 @@ class ChunkerTypedAnalyticsFieldsTest {
                         .setCurrentHopNumber(1)
                         .build())
                 .setConfig(ProcessConfiguration.newBuilder()
-                        .setJsonConfig(Struct.getDefaultInstance())
+                        .setJsonConfig(cacheDisabledConfig)
                         .build())
                 .build();
 
