@@ -54,6 +54,15 @@ dependencies {
     implementation 'io.quarkus:quarkus-smallrye-stork'
     implementation 'io.quarkus:quarkus-hibernate-validator'
     implementation 'io.quarkus:quarkus-cache'
+    implementation 'io.quarkus:quarkus-redis-client'
+    implementation 'io.quarkus:quarkus-micrometer'
+    // Concrete MeterRegistry implementation — required for ChunkCacheService's
+    // @Inject MeterRegistry to resolve. The umbrella quarkus-micrometer artifact
+    // only provides the API; without a registry extension on the classpath,
+    // ArC augmentation fails with "Unsatisfied dependency for type MeterRegistry"
+    // in clean-classpath environments (CI). Every other Pipestream module that
+    // injects MeterRegistry adds this same dep.
+    implementation 'io.quarkus:quarkus-micrometer-registry-prometheus'
     implementation 'io.quarkus:quarkus-container-image-docker'
 
     // Service Discovery dependencies for Consul
@@ -87,6 +96,15 @@ dependencies {
     testImplementation 'io.quarkus:quarkus-junit5-mockito'
     testImplementation 'io.rest-assured:rest-assured'
     testImplementation 'com.networknt:json-schema-validator:3.0.1'
+    // BaseWireMockTestResource (extended by ChunkerWireMockTestResource) for
+    // the R1-pack-3 integration test that spins up pipestream-wiremock-server
+    // as a testcontainer. Version governed by the pipestream BOM imported above.
+    testImplementation 'ai.pipestream:pipestream-test-support'
+
+    // Testcontainers for R1-pack-3 integration test. Version governed by the
+    // testcontainers-bom, which is transitively included via pipestream-test-support.
+    // (We use @QuarkusTestResource for lifecycle — no need for testcontainers-junit-jupiter.)
+    testImplementation 'org.testcontainers:testcontainers'
 
     runtimeOnly libs.quarkus.logging.manager
 }
