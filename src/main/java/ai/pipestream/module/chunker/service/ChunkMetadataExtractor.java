@@ -11,6 +11,7 @@ import opennlp.tools.tokenize.Tokenizer;
 import org.apache.commons.lang3.StringUtils;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.text.DecimalFormat;
 import java.util.*;
 import java.util.regex.Pattern;
@@ -439,6 +440,12 @@ public class ChunkMetadataExtractor {
             builder.setRelativePosition((float) chunkNumber / (totalChunks - 1));
         }
 
+        // PR-K2: UTF-8 byte size, distinct from character_count (Java chars).
+        // Single allocation per call. For ASCII these are equal; multi-byte
+        // UTF-8 (CJK, emoji, accented Latin) diverges. Useful for sink-side
+        // storage planning that the consumer should not have to recompute.
+        builder.setTextByteSize(chunkText.getBytes(StandardCharsets.UTF_8).length);
+
         return builder.build();
     }
 
@@ -611,6 +618,14 @@ public class ChunkMetadataExtractor {
                 .setNounDensity(total > 0 ? (float) nouns / total : 0)
                 .setVerbDensity(total > 0 ? (float) verbs / total : 0)
                 .setAdjectiveDensity(total > 0 ? (float) adjectives / total : 0)
+                // PR-K2: surface adverb_density on the typed proto. The
+                // adverbs counter was already computed in the slice walk
+                // above and rolled into content_word_ratio; until PR-K1
+                // added the field there was no proto slot to expose it
+                // independently. Same semantics as
+                // NlpDocumentAnalysis.adverb_density (doc-level),
+                // scoped here to the chunk's token slice.
+                .setAdverbDensity(total > 0 ? (float) adverbs / total : 0)
                 .setContentWordRatio(total > 0 ? (float) contentWords / total : 0)
                 .setUniqueLemmaCount(uniqueLemmas.size())
                 .setLexicalDensity(total > 0 ? (float) contentWords / total : 0)
