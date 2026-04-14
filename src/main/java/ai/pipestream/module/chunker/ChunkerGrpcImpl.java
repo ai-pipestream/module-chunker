@@ -504,6 +504,21 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
             Map<String, String> placeholderToUrlMap = result.placeholderToUrlMap();
 
+            // PR-I: when URL placeholder substitution happened, the doc-level
+            // nlpResult's tokenSpans/sentenceSpans reference the ORIGINAL text
+            // offsets, but the chunks below carry SUBSTITUTED-text offsets
+            // (placeholder lengths shift positions). Slicing the doc-level NLP
+            // with substituted offsets gives garbage. Pass null for slicing in
+            // that case so each chunk falls back to running OpenNLP per chunk
+            // (the legacy behavior). When no URLs were substituted, the
+            // offsets align and we can reuse the doc-level NLP for both
+            // base-counts (via slice) AND POS densities (via posTags/lemmas).
+            //
+            // This is the single biggest perf win in PR-I: in the common case
+            // (no URLs substituted), per-chunk OpenNLP runs go from 4 to 0.
+            NlpPreprocessor.NlpResult nlpForSlicing =
+                    placeholderToUrlMap.isEmpty() ? nlpResult : null;
+
             chunks = new ArrayList<>();
             int chunkNumber = 0;
             for (Chunk c : chunkRecords) {
@@ -518,8 +533,17 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                         && !placeholderToUrlMap.isEmpty()
                         && placeholderToUrlMap.keySet().stream().anyMatch(ph -> c.text().contains(ph));
 
+                // PR-I: compute the NLP slice ONCE per chunk and reuse it for
+                // both extractAllMetadata and extractChunkAnalytics. If
+                // nlpForSlicing is null (URL substitution invalidated offsets
+                // for this whole pass) sliceForChunk returns null and both
+                // metadata methods fall back to running OpenNLP per chunk.
+                ChunkMetadataExtractor.ChunkNlpSlice nlpSlice =
+                        metadataExtractor.sliceForChunk(nlpForSlicing,
+                                c.originalIndexStart(), c.originalIndexEnd());
+
                 Map<String, Value> extractedMetadata = metadataExtractor.extractAllMetadata(
-                        sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder);
+                        sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder, nlpSlice);
 
                 // §9 dedup groundwork: SHA-256 content_hash of the sanitised
                 // chunk text, stamped into the chunk metadata map. Identical
@@ -537,15 +561,15 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                 // ChunkerStreamingGrpcImpl already does this; the non-streaming
                 // rewrite must match so the output passes assertPostChunker.
                 //
-                // 7-arg overload: slices the doc-level NlpResult (posTags + lemmas
-                // + tokenSpans) on the chunk's original-text [start, end] byte
-                // range to compute per-chunk POS densities (noun/verb/adjective),
-                // content_word_ratio, unique_lemma_count, and lexical_density.
-                // Same data path the streaming impl uses — closes the feature
-                // parity gap the post-R1 correctness audit flagged.
+                // 8-arg overload: takes the pre-computed slice for base text
+                // statistics AND the doc-level NlpResult for POS-density
+                // slicing (posTags + lemmas binary search). Both use the
+                // SAME slice work computed above — eliminates per-chunk
+                // OpenNLP runs entirely in the common path.
                 ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
                         sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder,
-                        nlpResult, c.originalIndexStart(), c.originalIndexEnd());
+                        nlpSlice, nlpForSlicing,
+                        c.originalIndexStart(), c.originalIndexEnd());
 
                 ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
                         .setTextContent(sanitizedText)
@@ -633,6 +657,15 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
 
             String sanitizedText = UnicodeSanitizer.sanitizeInvalidUnicode(sentText);
 
+            // PR-I: Path B walks raw NLP sentence spans, so the doc-level
+            // nlpResult is ALWAYS safe to slice here (no URL substitution
+            // happens on this code path — sentences come straight from the
+            // NLP run on the unmodified source text). Compute the slice
+            // ONCE per sentence and pass it to both metadata methods so we
+            // never re-run OpenNLP on individual sentence chunks.
+            ChunkMetadataExtractor.ChunkNlpSlice nlpSlice =
+                    metadataExtractor.sliceForChunk(nlpResult, start, end);
+
             // Legacy string-keyed metadata map — Path A populates it at
             // processOneDirectiveConfig, so Path B must too or downstream
             // consumers that read from SemanticChunk.metadata silently get
@@ -641,7 +674,7 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             // URL substitute/restore pipeline — any URL in sanitizedText is
             // a real URL, not a placeholder.
             Map<String, Value> extractedMetadata = metadataExtractor.extractAllMetadata(
-                    sanitizedText, i, sentences.length, false);
+                    sanitizedText, i, sentences.length, false, nlpSlice);
 
             // §9 dedup groundwork: SHA-256 content_hash of the sanitised
             // sentence text, stamped into the chunk metadata map. Same
@@ -653,13 +686,13 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                     Value.newBuilder().setStringValue(contentHash).build());
 
             // §4.1: chunk_analytics is ALWAYS populated, including on sentences_internal chunks.
-            // 7-arg overload populates POS densities by slicing the doc-level
-            // NlpResult on this sentence's original-text [start, end] byte range.
-            // containsUrlPlaceholder=false because Path B walks raw NLP sentence
-            // spans and never runs through the URL substitution/restore pipeline.
+            // 8-arg overload uses the pre-computed slice for base text stats
+            // AND the doc-level nlpResult for POS-density slicing. Sentence
+            // spans always align with the NLP arrays so the slice is never
+            // null on this path.
             ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
                     sanitizedText, i, sentences.length, false,
-                    nlpResult, start, end);
+                    nlpSlice, nlpResult, start, end);
 
             ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
                     .setTextContent(sanitizedText)

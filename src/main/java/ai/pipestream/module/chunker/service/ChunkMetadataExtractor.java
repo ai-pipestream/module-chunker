@@ -37,7 +37,135 @@ public class ChunkMetadataExtractor {
     }
 
     /**
+     * Pre-computed per-chunk NLP data sliced from a doc-level {@link NlpPreprocessor.NlpResult}.
+     *
+     * <p>The whole point of this record is to let callers compute the NLP slice
+     * <em>once</em> per chunk and reuse it across both {@link #extractAllMetadata}
+     * and {@link #extractChunkAnalytics}. Without this, both metadata methods
+     * call {@link #safeTokenize} and {@link #safeSentDetect} on the chunk text
+     * — which means OpenNLP runs <b>4 times per chunk</b> (2 in extractAllMetadata
+     * + 2 in extractChunkAnalytics's 4-arg base form). On a 200-chunk doc that's
+     * 800 OpenNLP calls per request, easily the chunker's hot spot.
+     *
+     * <p>Use {@link #sliceForChunk} to build a slice from a doc-level NLP result
+     * + the chunk's [start, end] offsets. If the doc-level NLP is missing or
+     * the slice is empty (e.g. URL substitution invalidated the offsets),
+     * {@link #sliceForChunk} returns {@code null} and callers should pass
+     * {@code null} through — the metadata methods then fall back to running
+     * OpenNLP per chunk (current behavior).
+     *
+     * <p><b>Sum of token lengths</b> is pre-computed so the average-word-length
+     * calculation doesn't need a second pass over the sliced array.
+     */
+    public static final class ChunkNlpSlice {
+        public final String[] tokens;
+        public final int sentenceCount;
+        public final int sumTokenLengths;
+
+        ChunkNlpSlice(String[] tokens, int sentenceCount, int sumTokenLengths) {
+            this.tokens = tokens;
+            this.sentenceCount = sentenceCount;
+            this.sumTokenLengths = sumTokenLengths;
+        }
+    }
+
+    /**
+     * Slices a doc-level {@link NlpPreprocessor.NlpResult} for one chunk's
+     * [chunkStart, chunkEnd] byte range. Returns {@code null} if the slice
+     * cannot be safely produced — caller falls back to running OpenNLP on
+     * the chunk text directly.
+     *
+     * <p><b>O(log n + k)</b>: binary search to find the first token at or
+     * after {@code chunkStart}, then a linear walk to copy tokens whose
+     * spans fall within the chunk range. Sentence count is computed by
+     * walking the doc-level sentenceSpans once and counting overlaps with
+     * the chunk's range.
+     *
+     * <p><b>When this returns null:</b>
+     * <ul>
+     *   <li>{@code docNlp} is {@code null} (caller didn't precompute NLP).</li>
+     *   <li>{@code docNlp.tokens()} is empty (NLP ran on empty input).</li>
+     *   <li>The binary search finds no tokens in the chunk's range
+     *       (e.g. chunk offsets are stale because URL substitution
+     *       shifted the underlying text — see
+     *       {@link ai.pipestream.module.chunker.service.OverlapChunker}'s
+     *       URL substitution logic at line 346-358).</li>
+     * </ul>
+     *
+     * <p><b>Caller responsibility for URL safety:</b> if the chunker ran
+     * URL placeholder substitution on this doc, the chunk offsets reference
+     * the substituted text but {@code docNlp} was computed on the original
+     * text. The two coordinate systems do not align. Callers MUST pass
+     * {@code null} for {@code docNlp} when URL substitution happened, OR
+     * detect the stale-offset case via the binary search returning
+     * invalid indices (which this method does correctly — it returns
+     * {@code null} and the fallback fires). Pass {@code null} explicitly
+     * if you know URLs were substituted; relying on the indirect detection
+     * works but produces a few wasted slice attempts per request.
+     */
+    public ChunkNlpSlice sliceForChunk(
+            NlpPreprocessor.NlpResult docNlp, int chunkStart, int chunkEnd) {
+        if (docNlp == null || docNlp.tokens().length == 0) {
+            return null;
+        }
+        opennlp.tools.util.Span[] tokenSpans = docNlp.tokenSpans();
+        if (tokenSpans == null || tokenSpans.length == 0) {
+            return null;
+        }
+        int firstToken = findFirstTokenAtOrAfter(tokenSpans, chunkStart);
+        int lastToken = findLastTokenBefore(tokenSpans, chunkEnd);
+        if (firstToken < 0 || lastToken < firstToken) {
+            return null;
+        }
+
+        String[] docTokens = docNlp.tokens();
+        // Defensive: doc tokens array length should match span array length,
+        // but if it doesn't, clamp to whichever is shorter to avoid
+        // ArrayIndexOutOfBoundsException.
+        int safeLast = Math.min(lastToken, docTokens.length - 1);
+        if (safeLast < firstToken) {
+            return null;
+        }
+        String[] sliced = Arrays.copyOfRange(docTokens, firstToken, safeLast + 1);
+        int sumLen = 0;
+        for (String t : sliced) {
+            if (t != null) sumLen += t.length();
+        }
+
+        // Sentence count: walk the doc-level sentence spans once, count
+        // those whose [start, end) overlaps the chunk's [chunkStart, chunkEnd).
+        // This is O(s) where s is the doc-level sentence count — typically
+        // small (< 1000 even for huge docs).
+        opennlp.tools.util.Span[] sentenceSpans = docNlp.sentenceSpans();
+        int sentCount = 0;
+        if (sentenceSpans != null) {
+            for (opennlp.tools.util.Span ss : sentenceSpans) {
+                if (ss == null) continue;
+                // Half-open [start, end) overlap test
+                if (ss.getStart() < chunkEnd && ss.getEnd() > chunkStart) {
+                    sentCount++;
+                }
+            }
+        }
+        // A non-empty chunk always contains at least 1 sentence by definition
+        // (the chunker either splits on sentence boundaries or accumulates
+        // tokens within a single sentence). If our sentence-span walk
+        // returned 0 due to malformed spans, treat the chunk as 1 sentence
+        // so downstream avg-sentence-length math doesn't divide by zero.
+        if (sentCount == 0) sentCount = 1;
+
+        return new ChunkNlpSlice(sliced, sentCount, sumLen);
+    }
+
+    /**
      * Extracts comprehensive metadata from a text chunk.
+     *
+     * <p>Convenience overload that runs {@link #safeSentDetect} and
+     * {@link #safeTokenize} on the chunk text. Use the
+     * {@link #extractAllMetadata(String, int, int, boolean, ChunkNlpSlice)
+     * 5-arg overload} when you have a doc-level NLP result available — that
+     * version slices the doc tokens/spans instead of re-running OpenNLP per
+     * chunk, eliminating the chunker's #1 hot-path cost.
      *
      * @param chunkText The text content of the chunk
      * @param chunkNumber The position of this chunk in the sequence (0-based)
@@ -46,6 +174,28 @@ public class ChunkMetadataExtractor {
      * @return A map of metadata key-value pairs
      */
     public Map<String, Value> extractAllMetadata(String chunkText, int chunkNumber, int totalChunksInDocument, boolean containsUrlPlaceholder) {
+        return extractAllMetadata(chunkText, chunkNumber, totalChunksInDocument, containsUrlPlaceholder, null);
+    }
+
+    /**
+     * Extracts comprehensive metadata from a text chunk, using a pre-computed
+     * {@link ChunkNlpSlice} to avoid re-running OpenNLP on the chunk text.
+     *
+     * <p>If {@code slice} is {@code null}, this method falls back to running
+     * {@link #safeSentDetect} and {@link #safeTokenize} on the chunk text
+     * (current pre-PR-I behavior). When {@code slice} is non-null, the slice's
+     * pre-sliced tokens, sentence count, and sum-of-token-lengths are used
+     * directly — no per-chunk OpenNLP execution.
+     *
+     * @param chunkText The text content of the chunk
+     * @param chunkNumber The position of this chunk in the sequence (0-based)
+     * @param totalChunksInDocument Total number of chunks in the document
+     * @param containsUrlPlaceholder Whether the chunk contains URL placeholders
+     * @param slice Pre-computed NLP slice from {@link #sliceForChunk}, or
+     *              {@code null} to compute on the fly
+     * @return A map of metadata key-value pairs
+     */
+    public Map<String, Value> extractAllMetadata(String chunkText, int chunkNumber, int totalChunksInDocument, boolean containsUrlPlaceholder, ChunkNlpSlice slice) {
         Map<String, Value> metadataMap = new HashMap<>();
 
         if (StringUtils.isBlank(chunkText)) {
@@ -58,15 +208,31 @@ public class ChunkMetadataExtractor {
         int characterCount = chunkText.length();
         metadataMap.put("character_count", Value.newBuilder().setNumberValue(characterCount).build());
 
-        String[] sentences = safeSentDetect(chunkText);
-        int sentenceCount = sentences.length;
+        // Use slice if available; otherwise run OpenNLP per-chunk (legacy path).
+        // Both branches produce the same shape for downstream consumers.
+        String[] tokens;
+        int sentenceCount;
+        int sumTokenLengths;
+        if (slice != null) {
+            tokens = slice.tokens;
+            sentenceCount = slice.sentenceCount;
+            sumTokenLengths = slice.sumTokenLengths;
+        } else {
+            String[] sentences = safeSentDetect(chunkText);
+            sentenceCount = sentences.length;
+            tokens = safeTokenize(chunkText);
+            // Compute sum of token lengths the same way the legacy path did
+            sumTokenLengths = 0;
+            for (String t : tokens) {
+                if (t != null) sumTokenLengths += t.length();
+            }
+        }
         metadataMap.put("sentence_count", Value.newBuilder().setNumberValue(sentenceCount).build());
 
-        String[] tokens = safeTokenize(chunkText);
         int wordCount = tokens.length;
         metadataMap.put("word_count", Value.newBuilder().setNumberValue(wordCount).build());
 
-        double avgWordLength = wordCount > 0 ? (double) Arrays.stream(tokens).mapToInt(String::length).sum() / wordCount : 0;
+        double avgWordLength = wordCount > 0 ? (double) sumTokenLengths / wordCount : 0;
         metadataMap.put("average_word_length", Value.newBuilder().setNumberValue(Double.parseDouble(DECIMAL_FORMAT.format(avgWordLength))).build());
 
         double avgSentenceLength = sentenceCount > 0 ? (double) wordCount / sentenceCount : 0;
@@ -120,25 +286,70 @@ public class ChunkMetadataExtractor {
 
     /**
      * Extracts typed ChunkAnalytics proto for a chunk.
+     *
+     * <p>Convenience overload that runs OpenNLP on the chunk text. Use the
+     * {@link #extractChunkAnalytics(String, int, int, boolean, ChunkNlpSlice)
+     * 5-arg overload} when you have a pre-computed {@link ChunkNlpSlice}
+     * available — that version reuses the slice instead of re-running
+     * sentence detection and tokenization per chunk.
      */
     public ChunkAnalytics extractChunkAnalytics(String chunkText, int chunkNumber, int totalChunks, boolean containsUrlPlaceholder) {
+        return extractChunkAnalytics(chunkText, chunkNumber, totalChunks, containsUrlPlaceholder, null);
+    }
+
+    /**
+     * Extracts typed ChunkAnalytics proto for a chunk, optionally using a
+     * pre-computed {@link ChunkNlpSlice} to avoid re-running OpenNLP on the
+     * chunk text.
+     *
+     * <p>If {@code slice} is {@code null}, this method falls back to running
+     * {@link #safeSentDetect} and {@link #safeTokenize} on the chunk text
+     * (current pre-PR-I behavior). When {@code slice} is non-null, the slice's
+     * pre-computed tokens, sentence count, and sum-of-token-lengths are used
+     * directly.
+     *
+     * @param chunkText The text content of the chunk
+     * @param chunkNumber Position of this chunk in the sequence (0-based)
+     * @param totalChunks Total number of chunks in the document
+     * @param containsUrlPlaceholder Whether the chunk contains URL placeholders
+     * @param slice Pre-computed NLP slice from {@link #sliceForChunk}, or
+     *              {@code null} to compute on the fly
+     * @return ChunkAnalytics proto with text-statistics fields populated
+     *         (POS densities still require the
+     *         {@link #extractChunkAnalytics(String, int, int, boolean,
+     *         ChunkNlpSlice, NlpPreprocessor.NlpResult, int, int) 8-arg form})
+     */
+    public ChunkAnalytics extractChunkAnalytics(String chunkText, int chunkNumber, int totalChunks, boolean containsUrlPlaceholder, ChunkNlpSlice slice) {
         ChunkAnalytics.Builder builder = ChunkAnalytics.newBuilder();
         if (StringUtils.isBlank(chunkText)) {
             return builder.build();
         }
 
         int characterCount = chunkText.length();
-        String[] sentences = safeSentDetect(chunkText);
-        String[] tokens = safeTokenize(chunkText);
+        String[] tokens;
+        int sentenceCount;
+        int sumTokenLengths;
+        if (slice != null) {
+            tokens = slice.tokens;
+            sentenceCount = slice.sentenceCount;
+            sumTokenLengths = slice.sumTokenLengths;
+        } else {
+            String[] sentences = safeSentDetect(chunkText);
+            sentenceCount = sentences.length;
+            tokens = safeTokenize(chunkText);
+            sumTokenLengths = 0;
+            for (String t : tokens) {
+                if (t != null) sumTokenLengths += t.length();
+            }
+        }
         int wordCount = tokens.length;
-        int sentenceCount = sentences.length;
 
         builder.setWordCount(wordCount)
                 .setCharacterCount(characterCount)
                 .setSentenceCount(sentenceCount);
 
         if (wordCount > 0) {
-            double avgWordLen = (double) Arrays.stream(tokens).mapToInt(String::length).sum() / wordCount;
+            double avgWordLen = (double) sumTokenLengths / wordCount;
             builder.setAverageWordLength((float) avgWordLen);
             Set<String> unique = new HashSet<>(Arrays.asList(tokens));
             builder.setVocabularyDensity((float) unique.size() / wordCount);
@@ -263,32 +474,62 @@ public class ChunkMetadataExtractor {
     }
 
     /**
-     * Extracts typed ChunkAnalytics proto for a chunk, enriched with NLP POS data.
-     * Runs a lightweight NLP pass on the chunk text to compute chunk-level POS ratios.
-     *
-     * @param chunkText The text content of the chunk
-     * @param chunkNumber The position of this chunk in the sequence (0-based)
-     * @param totalChunks Total number of chunks in the document
-     * @param containsUrlPlaceholder Whether the chunk contains URL placeholders
-     * @param nlpPreprocessor NlpPreprocessor to run on the chunk text
-     * @return ChunkAnalytics proto with POS fields populated
-     */
-    /**
      * Extracts chunk analytics by slicing the document-level NLP arrays.
      * No NLP re-execution — just finds the token range for this chunk's character
      * offsets and computes POS ratios from that slice. O(log n) binary search + O(k) scan.
+     *
+     * <p>This 7-arg overload computes the {@link ChunkNlpSlice} internally and
+     * passes it to the {@link #extractChunkAnalytics(String, int, int, boolean,
+     * ChunkNlpSlice, NlpPreprocessor.NlpResult, int, int) 8-arg form}. Callers
+     * that compute the slice once and want to share it with
+     * {@link #extractAllMetadata(String, int, int, boolean, ChunkNlpSlice)}
+     * should use the 8-arg form directly to avoid the extra slice work.
      */
     public ChunkAnalytics extractChunkAnalytics(String chunkText, int chunkNumber, int totalChunks,
                                                  boolean containsUrlPlaceholder,
                                                  NlpPreprocessor.NlpResult docNlpResult,
                                                  int chunkStartOffset, int chunkEndOffset) {
-        ChunkAnalytics base = extractChunkAnalytics(chunkText, chunkNumber, totalChunks, containsUrlPlaceholder);
+        ChunkNlpSlice slice = sliceForChunk(docNlpResult, chunkStartOffset, chunkEndOffset);
+        return extractChunkAnalytics(chunkText, chunkNumber, totalChunks, containsUrlPlaceholder,
+                slice, docNlpResult, chunkStartOffset, chunkEndOffset);
+    }
+
+    /**
+     * Extracts typed ChunkAnalytics proto for a chunk using a pre-computed
+     * {@link ChunkNlpSlice} (for base text statistics) AND the doc-level
+     * {@link NlpPreprocessor.NlpResult} (for POS densities derived from
+     * posTags/lemmas slices).
+     *
+     * <p>This is the form ChunkerGrpcImpl Path A and Path B use: the slice
+     * is computed once per chunk via {@link #sliceForChunk} and shared
+     * between this call and the matching {@link #extractAllMetadata(String,
+     * int, int, boolean, ChunkNlpSlice)} call so the slice work is paid for
+     * once instead of twice. Eliminates the chunker's hot-path 4 OpenNLP
+     * runs per chunk (2 in extractAllMetadata + 2 in extractChunkAnalytics's
+     * 4-arg base).
+     *
+     * <p>If {@code slice} is {@code null}, falls back to running OpenNLP
+     * on the chunk text (legacy 4-arg behavior). If {@code docNlpResult} is
+     * {@code null}, the POS density fields stay at proto defaults (zero) —
+     * this is the same fallback as the pre-PR-I 7-arg overload.
+     */
+    public ChunkAnalytics extractChunkAnalytics(String chunkText, int chunkNumber, int totalChunks,
+                                                 boolean containsUrlPlaceholder,
+                                                 ChunkNlpSlice slice,
+                                                 NlpPreprocessor.NlpResult docNlpResult,
+                                                 int chunkStartOffset, int chunkEndOffset) {
+        ChunkAnalytics base = extractChunkAnalytics(chunkText, chunkNumber, totalChunks,
+                containsUrlPlaceholder, slice);
 
         if (docNlpResult == null || docNlpResult.tokens().length == 0 || StringUtils.isBlank(chunkText)) {
             return base;
         }
 
-        // Binary search for first token at or after chunkStartOffset
+        // Binary search for first token at or after chunkStartOffset.
+        // Same logic as the 7-arg form — POS densities still need the
+        // doc-level posTags / lemmas arrays, which the slice doesn't carry
+        // (carrying them would balloon the slice memory by 2× per chunk
+        // for a relatively small POS-density gain).
         opennlp.tools.util.Span[] spans = docNlpResult.tokenSpans();
         String[] posTags = docNlpResult.posTags();
         String[] lemmas = docNlpResult.lemmas();
@@ -306,6 +547,7 @@ public class ChunkMetadataExtractor {
         Set<String> uniqueLemmas = new HashSet<>();
 
         for (int i = firstToken; i <= lastToken; i++) {
+            if (i >= posTags.length || i >= lemmas.length) break;
             String tag = posTags[i];
             if ("NOUN".equals(tag) || "PROPN".equals(tag)) nouns++;
             else if ("VERB".equals(tag) || "AUX".equals(tag)) verbs++;
