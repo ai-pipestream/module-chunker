@@ -125,6 +125,26 @@ test {
     jvmArgs = ["-Xmx4g", "-XX:MaxMetaspaceSize=512m", "--add-opens", "java.base/java.lang=ALL-UNNAMED", "--add-opens", "java.base/java.lang.invoke=ALL-UNNAMED"]
 }
 
+// Integration test task (Quarkus-provided). Exclude the `perf` JUnit tag by
+// default so ChunkerCourtOpinionsPerfIT does NOT run in normal CI — that test
+// burns 30-60s chunking real court opinions and its primary value is the CSV
+// trend log it writes to build/chunker-perf.csv.
+//
+// Opt-in:
+//   ./gradlew quarkusIntTest -PrunPerf
+//   ./gradlew quarkusIntTest -PrunPerf -PperfOpinions=500
+//
+// The perfOpinions project property (default 100) is forwarded as the
+// perf.opinions system property which ChunkerCourtOpinionsPerfIT reads.
+tasks.named('quarkusIntTest').configure {
+    useJUnitPlatform {
+        if (!project.hasProperty('runPerf')) {
+            excludeTags 'perf'
+        }
+    }
+    systemProperty 'perf.opinions', project.findProperty('perfOpinions') ?: '100'
+}
+
 compileJava {
     options.encoding = 'UTF-8'
     options.compilerArgs << '-parameters'
