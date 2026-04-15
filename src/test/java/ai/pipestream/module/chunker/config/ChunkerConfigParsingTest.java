@@ -79,6 +79,89 @@ class ChunkerConfigParsingTest {
     }
 
     // =========================================================================
+    // ChunkerConfig: snake_case ↔ camelCase naming-convention coverage
+    //
+    // Callers build their config Struct with whatever convention they prefer —
+    // a TypeScript admin form may emit camelCase; a Python client using
+    // `preservingProtoFieldNames()` JSON printer may emit snake_case. Every
+    // field must round-trip correctly under BOTH conventions or Jackson
+    // silently drops the unknown key and the field reverts to its default.
+    // Prior audit found that preserveUrls + cleanText were missing their
+    // snake_case aliases; these tests pin both conventions on every field
+    // so the regression can't come back.
+    // =========================================================================
+
+    @Test
+    void parseSnakeCase_allFieldsRoundTripCorrectly() throws Exception {
+        ChunkerConfig config = mapper.readValue("""
+                {
+                  "algorithm": "sentence",
+                  "source_field": "title",
+                  "chunk_size": 750,
+                  "chunk_overlap": 125,
+                  "preserve_urls": false,
+                  "clean_text": false
+                }
+                """, ChunkerConfig.class);
+
+        assertThat(config.algorithm()).as("snake_case algorithm").isEqualTo(ChunkingAlgorithm.SENTENCE);
+        assertThat(config.sourceField()).as("snake_case source_field → sourceField").isEqualTo("title");
+        assertThat(config.chunkSize()).as("snake_case chunk_size → chunkSize").isEqualTo(750);
+        assertThat(config.chunkOverlap()).as("snake_case chunk_overlap → chunkOverlap").isEqualTo(125);
+        assertThat(config.preserveUrls())
+                .as("snake_case preserve_urls → preserveUrls (regression: this used "
+                        + "to silently default to true because @JsonAlias was missing)")
+                .isFalse();
+        assertThat(config.cleanText())
+                .as("snake_case clean_text → cleanText (regression: this used to "
+                        + "silently default to true because @JsonAlias was missing)")
+                .isFalse();
+    }
+
+    @Test
+    void parseCamelCase_allFieldsRoundTripCorrectly() throws Exception {
+        ChunkerConfig config = mapper.readValue("""
+                {
+                  "algorithm": "sentence",
+                  "sourceField": "title",
+                  "chunkSize": 750,
+                  "chunkOverlap": 125,
+                  "preserveUrls": false,
+                  "cleanText": false
+                }
+                """, ChunkerConfig.class);
+
+        assertThat(config.algorithm()).as("camelCase algorithm").isEqualTo(ChunkingAlgorithm.SENTENCE);
+        assertThat(config.sourceField()).as("camelCase sourceField").isEqualTo("title");
+        assertThat(config.chunkSize()).as("camelCase chunkSize").isEqualTo(750);
+        assertThat(config.chunkOverlap()).as("camelCase chunkOverlap").isEqualTo(125);
+        assertThat(config.preserveUrls()).as("camelCase preserveUrls").isFalse();
+        assertThat(config.cleanText()).as("camelCase cleanText").isFalse();
+    }
+
+    @Test
+    void parseMixedCaseConventions_allFieldsRoundTripCorrectly() throws Exception {
+        // A half-converted form — some fields camelCase, some snake_case.
+        // Both must still hydrate cleanly.
+        ChunkerConfig config = mapper.readValue("""
+                {
+                  "algorithm": "token",
+                  "source_field": "body",
+                  "chunkSize": 400,
+                  "chunk_overlap": 40,
+                  "preserveUrls": false,
+                  "clean_text": false
+                }
+                """, ChunkerConfig.class);
+
+        assertThat(config.sourceField()).as("mixed: source_field").isEqualTo("body");
+        assertThat(config.chunkSize()).as("mixed: chunkSize").isEqualTo(400);
+        assertThat(config.chunkOverlap()).as("mixed: chunk_overlap").isEqualTo(40);
+        assertThat(config.preserveUrls()).as("mixed: preserveUrls").isFalse();
+        assertThat(config.cleanText()).as("mixed: clean_text").isFalse();
+    }
+
+    // =========================================================================
     // ChunkerConfig: validation
     // =========================================================================
 

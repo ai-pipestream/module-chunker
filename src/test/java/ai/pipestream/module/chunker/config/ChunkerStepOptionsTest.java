@@ -227,6 +227,62 @@ class ChunkerStepOptionsTest {
     }
 
     // =========================================================================
+    // snake_case ↔ camelCase naming-convention coverage
+    //
+    // ProcessConfiguration.json_config is a google.protobuf.Struct — the
+    // field names inside are raw map keys, so whatever convention the
+    // caller used (snake_case from a Python/protobuf-native client,
+    // camelCase from a TypeScript admin form) lands in Jackson unchanged.
+    // Every field must round-trip under BOTH conventions or the "wrong"
+    // one silently drops to null and the effective() accessor returns the
+    // canonical default — which LOOKS like the caller's config was
+    // honoured but isn't. Prior audit found all three fields were missing
+    // their camelCase alias; these tests pin the fix so it can't regress.
+    // =========================================================================
+
+    @Test
+    void parseCamelCase_allFieldsRoundTripCorrectly() throws Exception {
+        ChunkerStepOptions opts = mapper.readValue("""
+                {
+                  "cacheEnabled": false,
+                  "cacheTtlSeconds": 3600,
+                  "alwaysEmitSentences": false
+                }
+                """, ChunkerStepOptions.class);
+
+        assertThat(opts.cacheEnabled())
+                .as("camelCase cacheEnabled → cacheEnabled (regression: this used "
+                        + "to silently default to null because @JsonAlias was missing, "
+                        + "and effectiveCacheEnabled() then incorrectly returned true)")
+                .isFalse();
+        assertThat(opts.cacheTtlSeconds())
+                .as("camelCase cacheTtlSeconds → cacheTtlSeconds (regression: used "
+                        + "to silently default to null)")
+                .isEqualTo(3600L);
+        assertThat(opts.alwaysEmitSentences())
+                .as("camelCase alwaysEmitSentences → alwaysEmitSentences (regression: "
+                        + "used to silently default to null)")
+                .isFalse();
+    }
+
+    @Test
+    void parseMixedCaseConventions_allFieldsRoundTripCorrectly() throws Exception {
+        // A half-converted form — some fields camelCase, some snake_case.
+        // Every combination must hydrate to the declared value.
+        ChunkerStepOptions opts = mapper.readValue("""
+                {
+                  "cache_enabled": false,
+                  "cacheTtlSeconds": 86400,
+                  "always_emit_sentences": false
+                }
+                """, ChunkerStepOptions.class);
+
+        assertThat(opts.cacheEnabled()).as("mixed: cache_enabled").isFalse();
+        assertThat(opts.cacheTtlSeconds()).as("mixed: cacheTtlSeconds").isEqualTo(86400L);
+        assertThat(opts.alwaysEmitSentences()).as("mixed: always_emit_sentences").isFalse();
+    }
+
+    // =========================================================================
     // DEFAULT_CACHE_TTL_SECONDS constant
     // =========================================================================
 
