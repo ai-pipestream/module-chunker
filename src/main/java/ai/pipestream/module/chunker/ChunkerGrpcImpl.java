@@ -37,7 +37,6 @@ import ai.pipestream.data.module.v1.*;
 import ai.pipestream.server.meta.BuildInfoProvider;
 import io.quarkus.grpc.GrpcService;
 import io.smallrye.mutiny.Uni;
-import io.smallrye.mutiny.infrastructure.Infrastructure;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.jboss.logging.Logger;
@@ -123,188 +122,232 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             return Uni.createFrom().item(createErrorResponse("Request cannot be null", null));
         }
 
-        boolean isTest = request.getIsTest();
-        String logPrefix = isTest ? "[TEST] " : "";
+        final boolean isTest = request.getIsTest();
+        final String logPrefix = isTest ? "[TEST] " : "";
+        final long startTime = System.currentTimeMillis();
+        final List<LogEntry> logs = new ArrayList<>();
 
-        // Offload to the Quarkus worker pool so .await().indefinitely() on cache ops is safe.
-        // The emitOn/runSubscriptionOn pattern is the canonical Vert.x context fix per
-        // platform-coding-patterns.md. Without this the supplier runs on the Vert.x event
-        // loop and blocking calls throw BlockingOperationNotAllowedException.
-        return Uni.createFrom().item(() -> {
-            long startTime = System.currentTimeMillis();
-            ProcessDataResponse.Builder responseBuilder = ProcessDataResponse.newBuilder();
-            List<LogEntry> logs = new ArrayList<>();
+        // =============================================================
+        // Phase 1: synchronous validation + NLP (no I/O)
+        //
+        // Everything in this phase is pure CPU work: parsing options,
+        // validating directives, running OpenNLP per unique source text,
+        // computing DocumentAnalytics. We do it inline in a Uni.createFrom()
+        // supplier so that any failure short-circuits to the top-level
+        // onFailure() recovery and produces a PROCESSING_OUTCOME_FAILURE.
+        // =============================================================
 
+        if (!request.hasDocument()) {
+            LOG.info(logPrefix + "No document provided in request");
+            return Uni.createFrom().item(ProcessDataResponse.newBuilder()
+                    .setOutcome(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS)
+                    .addLogEntries(moduleLog("Chunker service: no document to process", LogLevel.LOG_LEVEL_INFO))
+                    .build());
+        }
+
+        final PipeDoc inputDoc = request.getDocument();
+        final ProcessConfiguration config = request.getConfig();
+        final ServiceMetadata metadata = request.getMetadata();
+        final String streamId = metadata.getStreamId();
+        final String pipeStepName = metadata.getPipeStepName();
+
+        LOG.infof("%sProcessing document ID: %s for step: %s in stream: %s",
+                logPrefix,
+                inputDoc.getDocId() != null ? inputDoc.getDocId() : "unknown",
+                pipeStepName, streamId);
+
+        // ----------------------------------------------------------------
+        // Step 1: Parse ChunkerStepOptions from json_config (DESIGN.md §7.1 step 1)
+        // ----------------------------------------------------------------
+        final ChunkerStepOptions options;
+        Struct jsonConfig = config != null ? config.getJsonConfig() : null;
+        if (jsonConfig == null || jsonConfig.getFieldsCount() == 0) {
+            options = ChunkerStepOptions.defaults();
+            LOG.debugf("No json_config provided — using ChunkerStepOptions defaults");
+        } else {
             try {
-                if (!request.hasDocument()) {
-                    LOG.info(logPrefix + "No document provided in request");
-                    return ProcessDataResponse.newBuilder()
-                            .setOutcome(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS)
-                            .addLogEntries(moduleLog("Chunker service: no document to process", LogLevel.LOG_LEVEL_INFO))
-                            .build();
+                String jsonStr = JsonFormat.printer().print(jsonConfig);
+                options = objectMapper.readValue(jsonStr, ChunkerStepOptions.class);
+                LOG.debugf("Parsed ChunkerStepOptions: cacheEnabled=%b ttlSeconds=%d (always_emit_sentences is ignored per §21.9)",
+                        options.effectiveCacheEnabled(),
+                        options.effectiveCacheTtlSeconds());
+            } catch (Exception e) {
+                String msg = "Invalid ChunkerStepOptions JSON: " + e.getMessage();
+                LOG.errorf("INVALID_ARGUMENT: %s", msg);
+                return Uni.createFrom().item(createErrorResponse(msg, e));
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Step 2: Resolve directives — absent → FAILED_PRECONDITION (§21.1)
+        // ----------------------------------------------------------------
+        if (!inputDoc.hasSearchMetadata()
+                || !inputDoc.getSearchMetadata().hasVectorSetDirectives()) {
+            String msg = "Missing vector_set_directives on doc — " +
+                    "chunker requires directives (DESIGN.md §21.1, no legacy fallback)";
+            LOG.warnf("FAILED_PRECONDITION: %s", msg);
+            return Uni.createFrom().item(createErrorResponse(msg, null));
+        }
+
+        final List<VectorDirective> directives = inputDoc.getSearchMetadata()
+                .getVectorSetDirectives()
+                .getDirectivesList();
+
+        if (directives.isEmpty()) {
+            String msg = "Empty vector_set_directives — at least one directive required";
+            LOG.warnf("FAILED_PRECONDITION: %s", msg);
+            return Uni.createFrom().item(createErrorResponse(msg, null));
+        }
+
+        logs.add(moduleLog(logPrefix + "Processing " + directives.size()
+                + " directive(s) for document " + inputDoc.getDocId(),
+                LogLevel.LOG_LEVEL_INFO));
+
+        // ----------------------------------------------------------------
+        // Step 3: Validate source_label uniqueness + compute directive_keys (§21.2)
+        // ----------------------------------------------------------------
+        Set<String> seenLabels = new HashSet<>();
+        final Map<VectorDirective, String> directiveKeys = new LinkedHashMap<>();
+        for (VectorDirective d : directives) {
+            if (!seenLabels.add(d.getSourceLabel())) {
+                String msg = "Duplicate source_label '" + d.getSourceLabel()
+                        + "' in vector_set_directives — INVALID_ARGUMENT";
+                LOG.warnf("INVALID_ARGUMENT: %s", msg);
+                return Uni.createFrom().item(createErrorResponse(msg, null));
+            }
+            directiveKeys.put(d, DirectiveKeyComputer.compute(d));
+        }
+
+        // ----------------------------------------------------------------
+        // Step 4: Synchronous NLP pass — one NlpResult per unique source text,
+        // one DocumentAnalytics per source_label. Also build the ResolvedDirective
+        // cache Step 6 (sentences_internal) reuses, and the per-(directive,config)
+        // Uni list that drives the reactive fan-out.
+        //
+        // NLP is pure CPU work (OpenNLP, no I/O) so running it inline in the
+        // reactive composition is safe and avoids a redundant Uni wrapper per
+        // directive. Cache by source text so two directives selecting the same
+        // field (rare but legal) reuse one NLP run.
+        // ----------------------------------------------------------------
+        final String docHash = DirectiveKeyComputer.sha256b64url(inputDoc.getDocId());
+        final Map<String, NlpPreprocessor.NlpResult> nlpByText = new HashMap<>();
+        final Map<String, DocumentAnalytics> docAnalyticsBySourceLabel = new LinkedHashMap<>();
+        final Map<VectorDirective, ResolvedDirective> resolvedDirectives = new LinkedHashMap<>();
+        final List<Uni<SemanticProcessingResult>> perConfigTasks = new ArrayList<>();
+
+        // Synchronised wrapper so per-(directive,config) Unis completing on
+        // different threads can safely append audit log entries. Only the
+        // cache GET/PUT and the chunker build run off the caller thread —
+        // the chunker is CPU work and these log adds happen at most once
+        // per directive-config, so the synchronisation cost is negligible.
+        final List<LogEntry> taskLogs = java.util.Collections.synchronizedList(new ArrayList<>());
+
+        try {
+            for (VectorDirective directive : directives) {
+                String sourceLabel = directive.getSourceLabel();
+                String sourceText = extractSourceText(inputDoc, directive);
+
+                if (sourceText == null || sourceText.isEmpty()) {
+                    LOG.debugf("Directive source_label='%s' cel_selector='%s' yielded empty text — skipping",
+                            sourceLabel, directive.getCelSelector());
+                    logs.add(moduleLog(
+                            "Skipped directive '" + sourceLabel + "': source text is empty",
+                            LogLevel.LOG_LEVEL_DEBUG));
+                    continue;
                 }
 
-                PipeDoc inputDoc = request.getDocument();
-                ProcessConfiguration config = request.getConfig();
-                ServiceMetadata metadata = request.getMetadata();
-                String streamId = metadata.getStreamId();
-                String pipeStepName = metadata.getPipeStepName();
+                // Run NLP ONCE per unique source text within this request
+                NlpPreprocessor.NlpResult nlpResult = nlpByText.computeIfAbsent(
+                        sourceText, t -> nlpPreprocessor.preprocess(t));
 
-                LOG.infof("%sProcessing document ID: %s for step: %s in stream: %s",
-                        logPrefix,
-                        inputDoc.getDocId() != null ? inputDoc.getDocId() : "unknown",
-                        pipeStepName, streamId);
+                // Compute DocumentAnalytics ONCE per source_label (§21.2 enforces
+                // source_label uniqueness, so one SFA per label is correct).
+                final String srcLabelForDa = sourceLabel;
+                final String srcTextForDa = sourceText;
+                final NlpPreprocessor.NlpResult nlpForDa = nlpResult;
+                docAnalyticsBySourceLabel.computeIfAbsent(srcLabelForDa,
+                        k -> metadataExtractor.extractDocumentAnalytics(srcTextForDa, nlpForDa));
 
-                // ----------------------------------------------------------------
-                // Step 1: Parse ChunkerStepOptions from json_config (DESIGN.md §7.1 step 1)
-                // ----------------------------------------------------------------
-                ChunkerStepOptions options;
-                Struct jsonConfig = config != null ? config.getJsonConfig() : null;
-                if (jsonConfig == null || jsonConfig.getFieldsCount() == 0) {
-                    options = ChunkerStepOptions.defaults();
-                    LOG.debugf("No json_config provided — using ChunkerStepOptions defaults");
-                } else {
-                    try {
-                        String jsonStr = JsonFormat.printer().print(jsonConfig);
-                        options = objectMapper.readValue(jsonStr, ChunkerStepOptions.class);
-                        LOG.debugf("Parsed ChunkerStepOptions: cacheEnabled=%b ttlSeconds=%d (always_emit_sentences is ignored per §21.9)",
-                                options.effectiveCacheEnabled(),
-                                options.effectiveCacheTtlSeconds());
-                    } catch (Exception e) {
-                        String msg = "Invalid ChunkerStepOptions JSON: " + e.getMessage();
-                        LOG.errorf("INVALID_ARGUMENT: %s", msg);
-                        return createErrorResponse(msg, e);
+                String directiveKey = directiveKeys.get(directive);
+
+                // Cache the resolution so Step 6 can reuse it.
+                resolvedDirectives.put(directive,
+                        new ResolvedDirective(sourceText, nlpResult, directiveKey));
+
+                // Fan out one Uni per (directive, named chunker config) pair.
+                // Each Uni is the reactive flow: cache GET → on miss run chunker
+                // and cache PUT → build SPR. They run in parallel via
+                // Uni.combine().all().unis(...) below.
+                for (NamedChunkerConfig namedConfig : directive.getChunkerConfigsList()) {
+                    perConfigTasks.add(processOneDirectiveConfigReactive(
+                            inputDoc, docHash, sourceText, nlpResult,
+                            directive, directiveKey, namedConfig,
+                            options, streamId, pipeStepName, taskLogs));
+                }
+            }
+        } catch (Exception e) {
+            // Synchronous preparation failed (e.g. parseNamedChunkerConfig is
+            // called lazily inside processOneDirectiveConfigReactive, but
+            // anything thrown out of the loop above — extractSourceText,
+            // NLP preprocess, DocumentAnalytics extraction — lands here).
+            String errorMessage = "Error in ChunkerService: " + e.getMessage();
+            LOG.error(errorMessage, e);
+            return Uni.createFrom().item(createErrorResponse(errorMessage, e));
+        }
+
+        // =============================================================
+        // Phase 2: reactive fan-out over per-(directive,config) tasks.
+        // Fail-fast: any one failing Uni fails the combined Uni, which is
+        // caught by the top-level onFailure recovery. No worker-pool
+        // offload — the cache service runs on the Vert.x event loop and
+        // the chunker CPU work runs on whichever thread the cache callback
+        // resumes on (worker pool via Mutiny's default scheduling).
+        // =============================================================
+        final Uni<List<SemanticProcessingResult>> allTasksUni;
+        if (perConfigTasks.isEmpty()) {
+            allTasksUni = Uni.createFrom().item(java.util.Collections.emptyList());
+        } else {
+            allTasksUni = Uni.combine().all().unis(perConfigTasks)
+                    .with(rawResults -> {
+                        List<SemanticProcessingResult> collected = new ArrayList<>(rawResults.size());
+                        for (Object o : rawResults) {
+                            collected.add((SemanticProcessingResult) o);
+                        }
+                        return collected;
+                    });
+        }
+
+        // =============================================================
+        // Phase 3: final assembly (sync CPU work, done inside .map()).
+        //
+        // Steps 6–9 (sentences_internal emission, SFA rebuild, lex-sort,
+        // build output doc) all need the fully-populated SPR list and have
+        // no I/O, so they run inline after the combined Uni resolves.
+        // =============================================================
+        return allTasksUni
+                .map(outputSprs -> {
+                    // Transfer task-scoped log entries into the request-level log list.
+                    // They were collected on whichever threads the per-config Unis
+                    // resumed on; the synchronised wrapper guarantees no interleaving.
+                    synchronized (taskLogs) {
+                        logs.addAll(taskLogs);
                     }
-                }
 
-                // ----------------------------------------------------------------
-                // Step 2: Resolve directives — absent → FAILED_PRECONDITION (§21.1)
-                // ----------------------------------------------------------------
-                if (!inputDoc.hasSearchMetadata()
-                        || !inputDoc.getSearchMetadata().hasVectorSetDirectives()) {
-                    String msg = "Missing vector_set_directives on doc — " +
-                            "chunker requires directives (DESIGN.md §21.1, no legacy fallback)";
-                    LOG.warnf("FAILED_PRECONDITION: %s", msg);
-                    return createErrorResponse(msg, null);
-                }
+                    List<SemanticProcessingResult> sprAccumulator = new ArrayList<>(outputSprs);
 
-                List<VectorDirective> directives = inputDoc.getSearchMetadata()
-                        .getVectorSetDirectives()
-                        .getDirectivesList();
-
-                if (directives.isEmpty()) {
-                    String msg = "Empty vector_set_directives — at least one directive required";
-                    LOG.warnf("FAILED_PRECONDITION: %s", msg);
-                    return createErrorResponse(msg, null);
-                }
-
-                logs.add(moduleLog(logPrefix + "Processing " + directives.size()
-                        + " directive(s) for document " + inputDoc.getDocId(),
-                        LogLevel.LOG_LEVEL_INFO));
-
-                // ----------------------------------------------------------------
-                // Step 3: Validate source_label uniqueness + compute directive_keys (§21.2)
-                // ----------------------------------------------------------------
-                Set<String> seenLabels = new HashSet<>();
-                Map<VectorDirective, String> directiveKeys = new LinkedHashMap<>();
-                for (VectorDirective d : directives) {
-                    if (!seenLabels.add(d.getSourceLabel())) {
-                        String msg = "Duplicate source_label '" + d.getSourceLabel()
-                                + "' in vector_set_directives — INVALID_ARGUMENT";
-                        LOG.warnf("INVALID_ARGUMENT: %s", msg);
-                        return createErrorResponse(msg, null);
-                    }
-                    directiveKeys.put(d, DirectiveKeyComputer.compute(d));
-                }
-
-                // ----------------------------------------------------------------
-                // Steps 4–5: Directive loop — NLP + chunker + cache
-                // ----------------------------------------------------------------
-                String docHash = DirectiveKeyComputer.sha256b64url(inputDoc.getDocId());
-                List<SemanticProcessingResult> outputSprs = new ArrayList<>();
-                // NLP cache: source text → NlpResult (computed once per unique text)
-                Map<String, NlpPreprocessor.NlpResult> nlpByText = new HashMap<>();
-                // DocumentAnalytics per directive source_label, so the Step 7
-                // SourceFieldAnalytics loop can stamp DocumentAnalytics on every
-                // SFA entry (§5.1 SourceFieldAnalytics.document_analytics, proto
-                // field 3). Built here once per unique source_label so we don't
-                // recompute for each chunker config on the same directive.
-                Map<String, DocumentAnalytics> docAnalyticsBySourceLabel = new LinkedHashMap<>();
-
-                // PR-H: per-directive resolution cache (sourceText, nlpResult,
-                // directiveKey). Built in Step 4, reused in Step 6 so that
-                // sentences_internal emission doesn't have to re-call
-                // extractSourceText() and re-look-up the NLP cache. Pre-PR-H
-                // Step 6 duplicated three lookups per directive that Step 4
-                // had already performed. LinkedHashMap so directive iteration
-                // order is preserved across the two steps.
-                Map<VectorDirective, ResolvedDirective> resolvedDirectives = new LinkedHashMap<>();
-
-                for (VectorDirective directive : directives) {
-                    String sourceLabel = directive.getSourceLabel();
-                    String sourceText = extractSourceText(inputDoc, directive);
-
-                    if (sourceText == null || sourceText.isEmpty()) {
-                        LOG.debugf("Directive source_label='%s' cel_selector='%s' yielded empty text — skipping",
-                                sourceLabel, directive.getCelSelector());
-                        logs.add(moduleLog(
-                                "Skipped directive '" + sourceLabel + "': source text is empty",
-                                LogLevel.LOG_LEVEL_DEBUG));
-                        continue;
-                    }
-
-                    // Run NLP ONCE per unique source text within this request
-                    NlpPreprocessor.NlpResult nlpResult = nlpByText.computeIfAbsent(
-                            sourceText, t -> nlpPreprocessor.preprocess(t));
-
-                    // Compute DocumentAnalytics ONCE per source_label (the same
-                    // source_label will never yield different source_text in a
-                    // well-formed request; §21.2 enforces source_label uniqueness).
-                    final String srcLabelForDa = sourceLabel;
-                    final String srcTextForDa = sourceText;
-                    final NlpPreprocessor.NlpResult nlpForDa = nlpResult;
-                    docAnalyticsBySourceLabel.computeIfAbsent(srcLabelForDa,
-                            k -> metadataExtractor.extractDocumentAnalytics(srcTextForDa, nlpForDa));
-
-                    String directiveKey = directiveKeys.get(directive);
-
-                    // Cache the resolution so Step 6 can reuse it without
-                    // re-extracting source text or re-looking-up the NLP cache.
-                    resolvedDirectives.put(directive,
-                            new ResolvedDirective(sourceText, nlpResult, directiveKey));
-
-                    for (NamedChunkerConfig namedConfig : directive.getChunkerConfigsList()) {
-                        SemanticProcessingResult spr = processOneDirectiveConfig(
-                                inputDoc, docHash, sourceText, nlpResult,
-                                directive, directiveKey, namedConfig,
-                                options, streamId, pipeStepName, logs);
-                        outputSprs.add(spr);
-                    }
-                }
-
-                // ----------------------------------------------------------------
-                // Step 6: Always-emit sentences_internal SPR (§21.9)
-                //
-                // §21.9 is explicit: "No opt-out knob in chunker/embedder/semantic-graph
-                // for sentence emission." The ChunkerStepOptions.always_emit_sentences
-                // field is retained in the record for JSON-config back-compat but is
-                // deliberately NOT consulted here — sentences_internal is always emitted
-                // regardless of what the caller puts in the options JSON. Whether the
-                // sink indexes the sentence chunks is a sink-side toggle per §21.9,
-                // not a chunker concern.
-                // ----------------------------------------------------------------
-                {
-                    // Only emit if no directive config already produces sentence-level chunks
-                    boolean alreadyHasSentenceSpr = outputSprs.stream()
+                    // --------------------------------------------------------
+                    // Step 6: Always-emit sentences_internal SPR (§21.9)
+                    //
+                    // §21.9 is explicit: "No opt-out knob in chunker/embedder/semantic-graph
+                    // for sentence emission." The ChunkerStepOptions.always_emit_sentences
+                    // field is retained in the record for JSON-config back-compat but is
+                    // deliberately NOT consulted here — sentences_internal is always emitted
+                    // regardless of what the caller puts in the options JSON.
+                    // --------------------------------------------------------
+                    boolean alreadyHasSentenceSpr = sprAccumulator.stream()
                             .anyMatch(spr -> SENTENCES_INTERNAL_CONFIG_ID.equals(spr.getChunkConfigId()));
 
                     if (!alreadyHasSentenceSpr) {
-                        // PR-H: iterate the resolvedDirectives cache from
-                        // Step 4 instead of re-calling extractSourceText() +
-                        // nlpByText.get() + directiveKeys.get() for every
-                        // directive. Pre-PR-H Step 6 was duplicating three
-                        // lookups per directive; the cache makes Step 6 a
-                        // simple iteration over data we already have.
                         for (Map.Entry<VectorDirective, ResolvedDirective> entry : resolvedDirectives.entrySet()) {
                             VectorDirective directive = entry.getKey();
                             ResolvedDirective resolved = entry.getValue();
@@ -336,139 +379,132 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
                                     .setNlpAnalysis(nlpAnalysis)
                                     .build();
 
-                            outputSprs.add(sentencesSpr);
+                            sprAccumulator.add(sentencesSpr);
                             logs.add(moduleLog(
                                     "Emitted sentences_internal SPR for source_label='" + sourceLabel
                                             + "' with " + sentenceChunks.size() + " sentence(s)",
                                     LogLevel.LOG_LEVEL_DEBUG));
                         }
                     }
-                }
 
-                // ----------------------------------------------------------------
-                // Step 7: Merge with existing SPRs and build source_field_analytics
-                //
-                // Preserve SPRs from prior passes that have config_ids NOT produced
-                // in this pass. This allows sequential double-chunking to accumulate
-                // SPRs across passes without overwriting each other.
-                // ----------------------------------------------------------------
-                SearchMetadata.Builder smBuilder = inputDoc.getSearchMetadata().toBuilder();
+                    // --------------------------------------------------------
+                    // Step 7: Merge with existing SPRs and build source_field_analytics.
+                    // Preserve SPRs from prior passes whose (source, config_id) pair is
+                    // NOT produced in this pass — lets sequential double-chunking
+                    // accumulate SPRs across passes without overwriting each other.
+                    // --------------------------------------------------------
+                    SearchMetadata.Builder smBuilder = inputDoc.getSearchMetadata().toBuilder();
 
-                // Build set of (sourceField, chunkConfigId) pairs produced in this pass
-                Set<String> thisPassKeys = new HashSet<>();
-                for (SemanticProcessingResult spr : outputSprs) {
-                    thisPassKeys.add(spr.getSourceFieldName() + "|" + spr.getChunkConfigId());
-                }
-
-                // Re-use existing SPRs that are NOT being replaced by this pass
-                List<SemanticProcessingResult> mergedSprs = new ArrayList<>();
-                for (SemanticProcessingResult existingSpr : inputDoc.getSearchMetadata().getSemanticResultsList()) {
-                    String key = existingSpr.getSourceFieldName() + "|" + existingSpr.getChunkConfigId();
-                    if (!thisPassKeys.contains(key)) {
-                        mergedSprs.add(existingSpr);
+                    Set<String> thisPassKeys = new HashSet<>();
+                    for (SemanticProcessingResult spr : sprAccumulator) {
+                        thisPassKeys.add(spr.getSourceFieldName() + "|" + spr.getChunkConfigId());
                     }
-                }
-                mergedSprs.addAll(outputSprs);
 
-                // Rebuild source_field_analytics from ALL merged SPRs.
-                // §5.1 SourceFieldAnalytics proto fields:
-                //   1. source_field
-                //   2. chunk_config_id
-                //   3. document_analytics   ← from docAnalyticsBySourceLabel
-                //   4. total_chunks         ← SPR.chunks.size()
-                //   5. average_chunk_size   ← IntSummaryStatistics on chunk text length
-                //   6. min_chunk_size       ← same
-                //   7. max_chunk_size       ← same
-                smBuilder.clearSourceFieldAnalytics();
-                Set<String> analyticsKeys = new HashSet<>();
-                for (SemanticProcessingResult spr : mergedSprs) {
-                    String analyticsKey = spr.getSourceFieldName() + "|" + spr.getChunkConfigId();
-                    if (analyticsKeys.add(analyticsKey)) {
-                        List<SemanticChunk> chunksForSpr = spr.getChunksList();
-                        int totalChunks = chunksForSpr.size();
-
-                        SourceFieldAnalytics.Builder sfaBuilder = SourceFieldAnalytics.newBuilder()
-                                .setSourceField(spr.getSourceFieldName())
-                                .setChunkConfigId(spr.getChunkConfigId())
-                                .setTotalChunks(totalChunks);
-
-                        if (totalChunks > 0) {
-                            IntSummaryStatistics sizeStats = chunksForSpr.stream()
-                                    .mapToInt(c -> c.getEmbeddingInfo().getTextContent().length())
-                                    .summaryStatistics();
-                            sfaBuilder
-                                    .setAverageChunkSize((float) sizeStats.getAverage())
-                                    .setMinChunkSize(sizeStats.getMin())
-                                    .setMaxChunkSize(sizeStats.getMax());
+                    List<SemanticProcessingResult> mergedSprs = new ArrayList<>();
+                    for (SemanticProcessingResult existingSpr : inputDoc.getSearchMetadata().getSemanticResultsList()) {
+                        String key = existingSpr.getSourceFieldName() + "|" + existingSpr.getChunkConfigId();
+                        if (!thisPassKeys.contains(key)) {
+                            mergedSprs.add(existingSpr);
                         }
-
-                        // document_analytics is only available for source_labels
-                        // this pass actually processed. Merged-in SPRs from prior
-                        // passes on other source_labels get no document_analytics
-                        // stamp — that's correct: we don't have the source text
-                        // for those in this request.
-                        DocumentAnalytics da = docAnalyticsBySourceLabel.get(spr.getSourceFieldName());
-                        if (da != null) {
-                            sfaBuilder.setDocumentAnalytics(da);
-                        }
-
-                        smBuilder.addSourceFieldAnalytics(sfaBuilder.build());
                     }
-                }
+                    mergedSprs.addAll(sprAccumulator);
 
-                // ----------------------------------------------------------------
-                // Step 8: Lex sort semantic_results[] (§21.8)
-                // ----------------------------------------------------------------
-                mergedSprs.sort(Comparator
-                        .comparing(SemanticProcessingResult::getSourceFieldName)
-                        .thenComparing(SemanticProcessingResult::getChunkConfigId)
-                        .thenComparing(SemanticProcessingResult::getEmbeddingConfigId)
-                        .thenComparing(SemanticProcessingResult::getResultId));
+                    // Rebuild source_field_analytics from ALL merged SPRs (§5.1).
+                    smBuilder.clearSourceFieldAnalytics();
+                    Set<String> analyticsKeys = new HashSet<>();
+                    for (SemanticProcessingResult spr : mergedSprs) {
+                        String analyticsKey = spr.getSourceFieldName() + "|" + spr.getChunkConfigId();
+                        if (analyticsKeys.add(analyticsKey)) {
+                            List<SemanticChunk> chunksForSpr = spr.getChunksList();
+                            int totalChunks = chunksForSpr.size();
 
-                smBuilder.clearSemanticResults();
-                smBuilder.addAllSemanticResults(mergedSprs);
+                            SourceFieldAnalytics.Builder sfaBuilder = SourceFieldAnalytics.newBuilder()
+                                    .setSourceField(spr.getSourceFieldName())
+                                    .setChunkConfigId(spr.getChunkConfigId())
+                                    .setTotalChunks(totalChunks);
 
-                // ----------------------------------------------------------------
-                // Step 9: Build output PipeDoc and response
-                // ----------------------------------------------------------------
-                PipeDoc outputDoc = inputDoc.toBuilder()
-                        .setSearchMetadata(smBuilder.build())
-                        .build();
+                            if (totalChunks > 0) {
+                                IntSummaryStatistics sizeStats = chunksForSpr.stream()
+                                        .mapToInt(c -> c.getEmbeddingInfo().getTextContent().length())
+                                        .summaryStatistics();
+                                sfaBuilder
+                                        .setAverageChunkSize((float) sizeStats.getAverage())
+                                        .setMinChunkSize(sizeStats.getMin())
+                                        .setMaxChunkSize(sizeStats.getMax());
+                            }
 
-                long duration = System.currentTimeMillis() - startTime;
-                logs.add(moduleLog(
-                        logPrefix + "Chunking completed in " + duration + "ms: produced "
-                                + outputSprs.size() + " new SPR(s), "
-                                + mergedSprs.size() + " total SPR(s) for document " + inputDoc.getDocId(),
-                        LogLevel.LOG_LEVEL_INFO));
+                            DocumentAnalytics da = docAnalyticsBySourceLabel.get(spr.getSourceFieldName());
+                            if (da != null) {
+                                sfaBuilder.setDocumentAnalytics(da);
+                            }
 
-                return responseBuilder
-                        .setOutcome(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS)
-                        .setOutputDoc(outputDoc)
-                        .addAllLogEntries(logs)
-                        .build();
+                            smBuilder.addSourceFieldAnalytics(sfaBuilder.build());
+                        }
+                    }
 
-            } catch (Exception e) {
-                String errorMessage = "Error in ChunkerService: " + e.getMessage();
-                LOG.error(errorMessage, e);
-                return createErrorResponse(errorMessage, e);
-            }
-        }).runSubscriptionOn(Infrastructure.getDefaultWorkerPool());
+                    // --------------------------------------------------------
+                    // Step 8: Lex sort semantic_results[] (§21.8)
+                    // --------------------------------------------------------
+                    mergedSprs.sort(Comparator
+                            .comparing(SemanticProcessingResult::getSourceFieldName)
+                            .thenComparing(SemanticProcessingResult::getChunkConfigId)
+                            .thenComparing(SemanticProcessingResult::getEmbeddingConfigId)
+                            .thenComparing(SemanticProcessingResult::getResultId));
+
+                    smBuilder.clearSemanticResults();
+                    smBuilder.addAllSemanticResults(mergedSprs);
+
+                    // --------------------------------------------------------
+                    // Step 9: Build output PipeDoc and response
+                    // --------------------------------------------------------
+                    PipeDoc outputDoc = inputDoc.toBuilder()
+                            .setSearchMetadata(smBuilder.build())
+                            .build();
+
+                    long duration = System.currentTimeMillis() - startTime;
+                    logs.add(moduleLog(
+                            logPrefix + "Chunking completed in " + duration + "ms: produced "
+                                    + sprAccumulator.size() + " new SPR(s), "
+                                    + mergedSprs.size() + " total SPR(s) for document " + inputDoc.getDocId(),
+                            LogLevel.LOG_LEVEL_INFO));
+
+                    return ProcessDataResponse.newBuilder()
+                            .setOutcome(ProcessingOutcome.PROCESSING_OUTCOME_SUCCESS)
+                            .setOutputDoc(outputDoc)
+                            .addAllLogEntries(logs)
+                            .build();
+                })
+                .onFailure().recoverWithItem(throwable -> {
+                    String errorMessage = "Error in ChunkerService: " + throwable.getMessage();
+                    LOG.error(errorMessage, throwable);
+                    return createErrorResponse(errorMessage,
+                            throwable instanceof Exception ex ? ex : new RuntimeException(throwable));
+                });
     }
 
     // =========================================================================
-    // Per-(directive, config) processing
+    // Per-(directive, config) processing — reactive
     // =========================================================================
 
     /**
-     * Runs the cache-lookup → chunk → cache-writeback flow for a single
-     * {@code (directive, NamedChunkerConfig)} pair and returns one
-     * {@link SemanticProcessingResult} with a deterministic {@code result_id} and
-     * empty {@code embedding_config_id} (stage-1 placeholder per DESIGN.md §4.1).
+     * Reactive composition for a single {@code (directive, NamedChunkerConfig)}
+     * pair. Shape:
+     * <pre>
+     *   cache GET → (on miss: run chunker sync → cache PUT) → build SPR
+     * </pre>
+     * Fan-out over these Unis happens in {@link #processData}. The chunker
+     * itself is synchronous CPU work (no I/O) and runs inline inside
+     * {@code chain(...)} on whichever thread the cache callback resumes on.
      *
-     * <p>Audit log entries are appended to {@code logs}.
+     * <p>Audit log entries are appended to {@code logs}, which is the
+     * synchronised list owned by the caller so multiple per-config Unis
+     * completing on different threads can safely share it.
+     *
+     * <p>Returns one {@link SemanticProcessingResult} with a deterministic
+     * {@code result_id} and empty {@code embedding_config_id} (stage-1
+     * placeholder per DESIGN.md §4.1).
      */
-    private SemanticProcessingResult processOneDirectiveConfig(
+    private Uni<SemanticProcessingResult> processOneDirectiveConfigReactive(
             PipeDoc inputDoc,
             String docHash,
             String sourceText,
@@ -481,160 +517,167 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             String pipeStepName,
             List<LogEntry> logs) {
 
-        String sourceLabel = directive.getSourceLabel();
-        String chunkerConfigId = namedConfig.getConfigId();
+        final String sourceLabel = directive.getSourceLabel();
+        final String chunkerConfigId = namedConfig.getConfigId();
 
-        // ------------------------------------------------------------------
-        // Cache lookup (§7.1 step 3 — cache key per DESIGN.md §9.1)
-        // ------------------------------------------------------------------
-        List<SemanticChunk> chunks = null;
+        // Per-config chunker config is parsed eagerly so a bad struct fails the
+        // composed Uni (which the top-level onFailure catches). The parse is a
+        // pure CPU step with no I/O — no need to defer it into chain().
+        final ChunkerConfig perConfigChunkerConfig = parseNamedChunkerConfig(namedConfig, sourceLabel);
+
+        // Chunker execution + SemanticChunk build, callable in two places
+        // (cache miss, and the cache-disabled path).
+        final java.util.function.Supplier<List<SemanticChunk>> runChunker = () ->
+                buildChunksForConfig(inputDoc, docHash, sourceText, nlpResult,
+                        sourceLabel, chunkerConfigId, perConfigChunkerConfig,
+                        streamId, pipeStepName, logs);
+
+        final Uni<List<SemanticChunk>> chunksUni;
         if (options.effectiveCacheEnabled()) {
-            List<SemanticChunk> cached = cacheService.get(sourceText, chunkerConfigId)
-                    .await().indefinitely();
-            if (!cached.isEmpty()) {
-                chunks = cached;
-                LOG.debugf("Chunk cache HIT for source_label='%s' config_id='%s' — %d chunk(s)",
-                        sourceLabel, chunkerConfigId, chunks.size());
-                logs.add(moduleLog(
-                        "Cache HIT for source_label='" + sourceLabel
-                                + "' config_id='" + chunkerConfigId
-                                + "': reusing " + chunks.size() + " cached chunk(s)",
-                        LogLevel.LOG_LEVEL_DEBUG));
-            }
+            chunksUni = cacheService.get(sourceText, chunkerConfigId)
+                    .chain(cached -> {
+                        if (cached != null && !cached.isEmpty()) {
+                            LOG.debugf("Chunk cache HIT for source_label='%s' config_id='%s' — %d chunk(s)",
+                                    sourceLabel, chunkerConfigId, cached.size());
+                            logs.add(moduleLog(
+                                    "Cache HIT for source_label='" + sourceLabel
+                                            + "' config_id='" + chunkerConfigId
+                                            + "': reusing " + cached.size() + " cached chunk(s)",
+                                    LogLevel.LOG_LEVEL_DEBUG));
+                            return Uni.createFrom().item(cached);
+                        }
+                        // Cache miss — run chunker synchronously, then write back
+                        // and replace the Uni's item with the fresh chunks.
+                        List<SemanticChunk> freshChunks = runChunker.get();
+                        return cacheService.put(sourceText, chunkerConfigId, freshChunks,
+                                        options.effectiveCacheTtlSeconds(), false)
+                                .replaceWith(freshChunks);
+                    });
+        } else {
+            // No cache: defer the chunker run so any thrown exception lands on
+            // the Uni's failure channel (not as a synchronous throw at call site).
+            chunksUni = Uni.createFrom().item(runChunker);
         }
 
-        // ------------------------------------------------------------------
-        // Cache miss — parse per-config struct and run chunker
-        // ------------------------------------------------------------------
-        if (chunks == null) {
-            ChunkerConfig perConfigChunkerConfig = parseNamedChunkerConfig(namedConfig, sourceLabel);
+        return chunksUni.map(chunks -> {
+            // Build SPR with deterministic result_id and directive_key stamp (§21.2, §21.5)
+            NlpDocumentAnalysis nlpAnalysis = ChunkerSupport.buildNlpAnalysis(nlpResult);
 
-            ChunkingResult result = overlapChunker.createChunks(
-                    inputDoc, perConfigChunkerConfig, streamId, pipeStepName, nlpResult);
-            List<Chunk> chunkRecords = result.chunks();
+            // §21.5 deterministic result_id: stage1:{docHash}:{sourceLabel}:{chunkerConfigId}:
+            String resultId = "stage1:" + docHash + ":" + sourceLabel + ":" + chunkerConfigId + ":";
 
-            logs.add(moduleLog(
-                    "Chunked source_label='" + sourceLabel
-                            + "' config_id='" + chunkerConfigId
-                            + "' algorithm=" + perConfigChunkerConfig.algorithm()
-                            + " → " + chunkRecords.size() + " chunk(s) from "
-                            + sourceText.length() + " characters",
-                    LogLevel.LOG_LEVEL_INFO));
+            return SemanticProcessingResult.newBuilder()
+                    .setResultId(resultId)
+                    .setSourceFieldName(sourceLabel)
+                    .setChunkConfigId(chunkerConfigId)
+                    .setEmbeddingConfigId("")   // KEY: empty = stage-1 placeholder (§4.1)
+                    .addAllChunks(chunks)
+                    .putMetadata("directive_key",
+                            Value.newBuilder().setStringValue(directiveKey).build())
+                    .setNlpAnalysis(nlpAnalysis)
+                    .build();
+        });
+    }
 
-            Map<String, String> placeholderToUrlMap = result.placeholderToUrlMap();
+    /**
+     * Runs {@link OverlapChunker#createChunks} and converts the raw
+     * {@link Chunk} records into {@link SemanticChunk} protos with
+     * deterministic chunk_ids (§21.5) and full chunk_analytics (§4.1,
+     * including PR-K2 content_hash). Pure synchronous CPU work — safe to
+     * call from inside a Uni chain callback.
+     */
+    private List<SemanticChunk> buildChunksForConfig(
+            PipeDoc inputDoc,
+            String docHash,
+            String sourceText,
+            NlpPreprocessor.NlpResult nlpResult,
+            String sourceLabel,
+            String chunkerConfigId,
+            ChunkerConfig perConfigChunkerConfig,
+            String streamId,
+            String pipeStepName,
+            List<LogEntry> logs) {
 
-            // PR-I: when URL placeholder substitution happened, the doc-level
-            // nlpResult's tokenSpans/sentenceSpans reference the ORIGINAL text
-            // offsets, but the chunks below carry SUBSTITUTED-text offsets
-            // (placeholder lengths shift positions). Slicing the doc-level NLP
-            // with substituted offsets gives garbage. Pass null for slicing in
-            // that case so each chunk falls back to running OpenNLP per chunk
-            // (the legacy behavior). When no URLs were substituted, the
-            // offsets align and we can reuse the doc-level NLP for both
-            // base-counts (via slice) AND POS densities (via posTags/lemmas).
-            //
-            // This is the single biggest perf win in PR-I: in the common case
-            // (no URLs substituted), per-chunk OpenNLP runs go from 4 to 0.
-            NlpPreprocessor.NlpResult nlpForSlicing =
-                    placeholderToUrlMap.isEmpty() ? nlpResult : null;
+        ChunkingResult result = overlapChunker.createChunks(
+                inputDoc, perConfigChunkerConfig, streamId, pipeStepName, nlpResult);
+        List<Chunk> chunkRecords = result.chunks();
 
-            chunks = new ArrayList<>();
-            int chunkNumber = 0;
-            for (Chunk c : chunkRecords) {
-                // §21.5 deterministic chunk_id
-                String chunkId = docHash + ":" + sourceLabel + ":" + chunkerConfigId
-                        + ":" + chunkNumber + ":" + c.originalIndexStart() + ":" + c.originalIndexEnd();
+        logs.add(moduleLog(
+                "Chunked source_label='" + sourceLabel
+                        + "' config_id='" + chunkerConfigId
+                        + "' algorithm=" + perConfigChunkerConfig.algorithm()
+                        + " → " + chunkRecords.size() + " chunk(s) from "
+                        + sourceText.length() + " characters",
+                LogLevel.LOG_LEVEL_INFO));
 
-                String sanitizedText = UnicodeSanitizer.sanitizeInvalidUnicode(c.text());
+        Map<String, String> placeholderToUrlMap = result.placeholderToUrlMap();
 
-                boolean containsUrlPlaceholder = (perConfigChunkerConfig.preserveUrls() != null
-                        && perConfigChunkerConfig.preserveUrls())
-                        && !placeholderToUrlMap.isEmpty()
-                        && placeholderToUrlMap.keySet().stream().anyMatch(ph -> c.text().contains(ph));
+        // PR-I: when URL placeholder substitution happened, the doc-level
+        // nlpResult's tokenSpans/sentenceSpans reference the ORIGINAL text
+        // offsets, but the chunks below carry SUBSTITUTED-text offsets
+        // (placeholder lengths shift positions). Slicing the doc-level NLP
+        // with substituted offsets gives garbage. Pass null for slicing in
+        // that case so each chunk falls back to running OpenNLP per chunk
+        // (the legacy behavior). When no URLs were substituted, the
+        // offsets align and we can reuse the doc-level NLP for both
+        // base-counts (via slice) AND POS densities (via posTags/lemmas).
+        NlpPreprocessor.NlpResult nlpForSlicing =
+                placeholderToUrlMap.isEmpty() ? nlpResult : null;
 
-                // PR-I: compute the NLP slice ONCE per chunk so extractChunkAnalytics
-                // doesn't re-run OpenNLP on the chunk text. If nlpForSlicing is
-                // null (URL substitution invalidated offsets for this whole
-                // pass) sliceForChunk returns null and the metadata methods
-                // fall back to running OpenNLP per chunk.
-                ChunkMetadataExtractor.ChunkNlpSlice nlpSlice =
-                        metadataExtractor.sliceForChunk(nlpForSlicing,
-                                c.originalIndexStart(), c.originalIndexEnd());
+        List<SemanticChunk> chunks = new ArrayList<>(chunkRecords.size());
+        int chunkNumber = 0;
+        for (Chunk c : chunkRecords) {
+            // §21.5 deterministic chunk_id
+            String chunkId = docHash + ":" + sourceLabel + ":" + chunkerConfigId
+                    + ":" + chunkNumber + ":" + c.originalIndexStart() + ":" + c.originalIndexEnd();
 
-                // §4.1: chunk_analytics is ALWAYS populated. The streaming impl at
-                // ChunkerStreamingGrpcImpl already does this; the non-streaming
-                // rewrite must match so the output passes assertPostChunker.
-                //
-                // 8-arg overload: takes the pre-computed slice for base text
-                // statistics AND the doc-level NlpResult for POS-density
-                // slicing (posTags + lemmas binary search). Both use the
-                // SAME slice work computed above — eliminates per-chunk
-                // OpenNLP runs entirely in the common path.
-                ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
-                        sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder,
-                        nlpSlice, nlpForSlicing,
-                        c.originalIndexStart(), c.originalIndexEnd());
+            String sanitizedText = UnicodeSanitizer.sanitizeInvalidUnicode(c.text());
 
-                // PR-K2 promoted content_hash to the typed ChunkAnalytics field.
-                // PR-K3 removed the duplicate write to the loose metadata map —
-                // chunk_analytics.content_hash is now the canonical home.
-                String contentHash = ChunkerSupport.sha256Hex(sanitizedText);
-                chunkAnalytics = chunkAnalytics.toBuilder()
-                        .setContentHash(contentHash)
-                        .build();
+            boolean containsUrlPlaceholder = (perConfigChunkerConfig.preserveUrls() != null
+                    && perConfigChunkerConfig.preserveUrls())
+                    && !placeholderToUrlMap.isEmpty()
+                    && placeholderToUrlMap.keySet().stream().anyMatch(ph -> c.text().contains(ph));
 
-                ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
-                        .setTextContent(sanitizedText)
-                        .setChunkId(chunkId)
-                        .setOriginalCharStartOffset(c.originalIndexStart())
-                        .setOriginalCharEndOffset(c.originalIndexEnd())
-                        .setChunkConfigId(chunkerConfigId)
-                        // vector intentionally NOT set — stage-1 placeholder (§4.1)
-                        .build();
+            // PR-I: compute the NLP slice ONCE per chunk so extractChunkAnalytics
+            // doesn't re-run OpenNLP on the chunk text.
+            ChunkMetadataExtractor.ChunkNlpSlice nlpSlice =
+                    metadataExtractor.sliceForChunk(nlpForSlicing,
+                            c.originalIndexStart(), c.originalIndexEnd());
 
-                // PR-K3: SemanticChunk.metadata is no longer populated by the
-                // chunker. All 17 fields it used to hold (word_count,
-                // character_count, is_first_chunk, etc.) PLUS content_hash
-                // now live exclusively on the typed ChunkAnalytics proto.
-                // The loose map remains as an extension point for future
-                // caller-injected metadata that doesn't fit the typed schema.
-                SemanticChunk semanticChunk = SemanticChunk.newBuilder()
-                        .setChunkId(chunkId)
-                        .setChunkNumber(chunkNumber)
-                        .setEmbeddingInfo(embedding)
-                        .setChunkAnalytics(chunkAnalytics)
-                        .build();
+            // §4.1: chunk_analytics is ALWAYS populated.
+            ai.pipestream.data.v1.ChunkAnalytics chunkAnalytics = metadataExtractor.extractChunkAnalytics(
+                    sanitizedText, chunkNumber, chunkRecords.size(), containsUrlPlaceholder,
+                    nlpSlice, nlpForSlicing,
+                    c.originalIndexStart(), c.originalIndexEnd());
 
-                chunks.add(semanticChunk);
-                chunkNumber++;
-            }
+            // PR-K2 promoted content_hash to the typed ChunkAnalytics field.
+            String contentHash = ChunkerSupport.sha256Hex(sanitizedText);
+            chunkAnalytics = chunkAnalytics.toBuilder()
+                    .setContentHash(contentHash)
+                    .build();
 
-            // Cache writeback (§21.7: isRtbfSuppressed=false — future PR wires real predicate)
-            if (options.effectiveCacheEnabled()) {
-                cacheService.put(sourceText, chunkerConfigId, chunks,
-                        options.effectiveCacheTtlSeconds(), false)
-                        .await().indefinitely();
-            }
+            ChunkEmbedding embedding = ChunkEmbedding.newBuilder()
+                    .setTextContent(sanitizedText)
+                    .setChunkId(chunkId)
+                    .setOriginalCharStartOffset(c.originalIndexStart())
+                    .setOriginalCharEndOffset(c.originalIndexEnd())
+                    .setChunkConfigId(chunkerConfigId)
+                    // vector intentionally NOT set — stage-1 placeholder (§4.1)
+                    .build();
+
+            // PR-K3: SemanticChunk.metadata is no longer populated by the chunker.
+            SemanticChunk semanticChunk = SemanticChunk.newBuilder()
+                    .setChunkId(chunkId)
+                    .setChunkNumber(chunkNumber)
+                    .setEmbeddingInfo(embedding)
+                    .setChunkAnalytics(chunkAnalytics)
+                    .build();
+
+            chunks.add(semanticChunk);
+            chunkNumber++;
         }
 
-        // ------------------------------------------------------------------
-        // Build SPR with deterministic result_id and directive_key stamp (§21.2, §21.5)
-        // ------------------------------------------------------------------
-        NlpDocumentAnalysis nlpAnalysis = ChunkerSupport.buildNlpAnalysis(nlpResult);
-
-        // §21.5 deterministic result_id: stage1:{docHash}:{sourceLabel}:{chunkerConfigId}:
-        String resultId = "stage1:" + docHash + ":" + sourceLabel + ":" + chunkerConfigId + ":";
-
-        return SemanticProcessingResult.newBuilder()
-                .setResultId(resultId)
-                .setSourceFieldName(sourceLabel)
-                .setChunkConfigId(chunkerConfigId)
-                .setEmbeddingConfigId("")   // KEY: empty = stage-1 placeholder (§4.1)
-                .addAllChunks(chunks)
-                .putMetadata("directive_key",
-                        Value.newBuilder().setStringValue(directiveKey).build())
-                .setNlpAnalysis(nlpAnalysis)
-                .build();
+        return chunks;
     }
 
     // =========================================================================
