@@ -125,24 +125,38 @@ test {
     jvmArgs = ["-Xmx4g", "-XX:MaxMetaspaceSize=512m", "--add-opens", "java.base/java.lang=ALL-UNNAMED", "--add-opens", "java.base/java.lang.invoke=ALL-UNNAMED"]
 }
 
-// Integration test task (Quarkus-provided). Exclude the `perf` JUnit tag by
-// default so ChunkerCourtOpinionsPerfIT does NOT run in normal CI — that test
-// burns 30-60s chunking real court opinions and its primary value is the CSV
-// trend log it writes to build/chunker-perf.csv.
+// Integration test task (Quarkus-provided). Excludes the `perf` and
+// `fixture-dump` JUnit tags by default so neither ChunkerCourtOpinionsPerfIT
+// nor ChunkerFixtureDumpIT runs in normal CI — both burn 30-60s chunking real
+// court opinions and both are manual-opt-in tools (CSV trend log, downstream
+// fixture regeneration) rather than correctness gates.
 //
-// Opt-in:
+// Opt-in — perf CSV trend log:
 //   ./gradlew quarkusIntTest -PrunPerf
 //   ./gradlew quarkusIntTest -PrunPerf -PperfOpinions=500
 //
-// The perfOpinions project property (default 100) is forwarded as the
-// perf.opinions system property which ChunkerCourtOpinionsPerfIT reads.
+// Opt-in — fixture dump for downstream modules (e.g. module-embedder):
+//   ./gradlew quarkusIntTest -PrunFixtureDump -PfixtureOutDir=/tmp/chunker-fixtures
+//   ./gradlew quarkusIntTest -PrunFixtureDump -PfixtureOutDir=/tmp/chunker-fixtures -PfixtureOpinions=1000
+//
+// Project property → system property mapping:
+//   perfOpinions    → perf.opinions        (ChunkerCourtOpinionsPerfIT)
+//   fixtureOutDir   → fixture.dump.dir     (ChunkerFixtureDumpIT — required when -PrunFixtureDump)
+//   fixtureOpinions → fixture.opinions     (ChunkerFixtureDumpIT, default 100)
 tasks.named('quarkusIntTest').configure {
     useJUnitPlatform {
         if (!project.hasProperty('runPerf')) {
             excludeTags 'perf'
         }
+        if (!project.hasProperty('runFixtureDump')) {
+            excludeTags 'fixture-dump'
+        }
     }
     systemProperty 'perf.opinions', project.findProperty('perfOpinions') ?: '100'
+    if (project.hasProperty('fixtureOutDir')) {
+        systemProperty 'fixture.dump.dir', project.property('fixtureOutDir')
+    }
+    systemProperty 'fixture.opinions', project.findProperty('fixtureOpinions') ?: '100'
 }
 
 compileJava {
