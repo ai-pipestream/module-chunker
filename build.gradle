@@ -95,7 +95,7 @@ dependencies {
     testImplementation libs.assertj.core
     testImplementation 'io.quarkus:quarkus-junit5-mockito'
     testImplementation 'io.rest-assured:rest-assured'
-    testImplementation 'com.networknt:json-schema-validator:3.0.1'
+    testImplementation 'com.networknt:json-schema-validator:3.0.2'
     // BaseWireMockTestResource (extended by ChunkerWireMockTestResource) for
     // the R1-pack-3 integration test that spins up pipestream-wiremock-server
     // as a testcontainer. Version governed by the pipestream BOM imported above.
