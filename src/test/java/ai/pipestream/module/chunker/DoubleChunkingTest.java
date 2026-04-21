@@ -50,11 +50,11 @@ public class DoubleChunkingTest {
             return;
         }
 
-        // First chunking: large chunks (1000 tokens, 200 overlap) from "title" field
+        // First chunking: large chunks (1000 tokens, 200 overlap) from "body" field
         List<PipeDoc> firstChunkedDocs = performFirstChunking(parsedDocs);
         log.info("First chunking produced {} documents", firstChunkedDocs.size());
 
-        // Second chunking: small chunks (300 tokens, 50 overlap) from "title" field
+        // Second chunking: small chunks (300 tokens, 50 overlap) from "body" field
         List<PipeDoc> doubleChunkedDocs = performSecondChunking(firstChunkedDocs);
         log.info("Double chunking produced {} documents", doubleChunkedDocs.size());
 
@@ -84,7 +84,7 @@ public class DoubleChunkingTest {
 
     private List<PipeDoc> performFirstChunking(List<PipeDoc> parsedDocs) {
         List<PipeDoc> chunkedDocs = new ArrayList<>();
-        VectorSetDirectives directives = TestDirectiveBuilder.withSingleTokenDirective("title", 1000, 200);
+        VectorSetDirectives directives = TestDirectiveBuilder.withSingleTokenDirective("body", 1000, 200);
 
         for (PipeDoc doc : parsedDocs) {
             try {
@@ -105,7 +105,7 @@ public class DoubleChunkingTest {
 
     private List<PipeDoc> performSecondChunking(List<PipeDoc> firstChunkedDocs) {
         List<PipeDoc> doubleChunkedDocs = new ArrayList<>();
-        VectorSetDirectives directives = TestDirectiveBuilder.withSingleTokenDirective("title", 300, 50);
+        VectorSetDirectives directives = TestDirectiveBuilder.withSingleTokenDirective("body", 300, 50);
 
         for (PipeDoc doc : firstChunkedDocs) {
             try {

@@ -326,43 +326,33 @@ public class OpenApiSchemaExtractionTest {
         // We'll inject the Validator and test ChunkerConfig instances
 
         try {
-            // Test valid config
-            var validConfig = ai.pipestream.module.chunker.config.ChunkerConfig.createDefault();
-            String validationResult = validConfig.validate();
-            assertThat("Default config should be valid", validationResult, is(nullValue()));
-
-            // Test invalid chunkSize (too small)
-            var invalidConfig1 = ai.pipestream.module.chunker.config.ChunkerConfig.create(
+            // Strict ctor: all six fields required. Valid baseline.
+            var validConfig = new ai.pipestream.module.chunker.config.ChunkerConfig(
                 ai.pipestream.module.chunker.model.ChunkingAlgorithm.TOKEN,
-                "body",
-                0, // Invalid: below minimum of 1
-                0,
-                true
-            );
+                "body", 500, 50, true, true);
+            String validationResult = validConfig.validate();
+            assertThat("Valid config should pass validate()", validationResult, is(nullValue()));
+
+            // Invalid chunkSize (too small).
+            var invalidConfig1 = new ai.pipestream.module.chunker.config.ChunkerConfig(
+                ai.pipestream.module.chunker.model.ChunkingAlgorithm.TOKEN,
+                "body", 0, 0, true, true);
             String validation1 = invalidConfig1.validate();
             assertThat("Config with chunkSize < 1 should be invalid", validation1, is(notNullValue()));
             assertThat("Validation message should mention chunkSize range", validation1, containsString("chunkSize must be between 1 and 10000"));
 
-            // Test invalid chunkOverlap (too large)
-            var invalidConfig2 = ai.pipestream.module.chunker.config.ChunkerConfig.create(
+            // Invalid chunkOverlap (too large).
+            var invalidConfig2 = new ai.pipestream.module.chunker.config.ChunkerConfig(
                 ai.pipestream.module.chunker.model.ChunkingAlgorithm.TOKEN,
-                "body",
-                500,
-                6000, // Invalid: above maximum of 5000
-                true
-            );
+                "body", 500, 6000, true, true);
             String validation2 = invalidConfig2.validate();
             assertThat("Config with chunkOverlap > 5000 should be invalid", validation2, is(notNullValue()));
             assertThat("Validation message should mention chunkOverlap range", validation2, containsString("chunkOverlap must be between 0 and 5000"));
 
-            // Test cross-field validation (overlap >= chunkSize)
-            var invalidConfig3 = ai.pipestream.module.chunker.config.ChunkerConfig.create(
+            // Cross-field: overlap must be strictly less than chunkSize.
+            var invalidConfig3 = new ai.pipestream.module.chunker.config.ChunkerConfig(
                 ai.pipestream.module.chunker.model.ChunkingAlgorithm.TOKEN,
-                "body",
-                100,
-                100, // Invalid: overlap should be < chunkSize
-                true
-            );
+                "body", 100, 100, true, true);
             String validation3 = invalidConfig3.validate();
             assertThat("Config with chunkOverlap >= chunkSize should be invalid", validation3, is(notNullValue()));
             assertThat("Validation message should mention overlap vs size relationship", validation3, containsString("chunkOverlap must be less than chunkSize"));

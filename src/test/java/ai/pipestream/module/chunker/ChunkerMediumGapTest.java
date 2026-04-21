@@ -71,37 +71,39 @@ class ChunkerMediumGapTest {
         return Stream.of(
                 Arguments.of(
                         "chunkSize_negative",
-                        Struct.newBuilder()
-                                .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
-                                .putFields("chunkSize", Value.newBuilder().setNumberValue(-100).build())
-                                .putFields("chunkOverlap", Value.newBuilder().setNumberValue(0).build())
-                                .build(),
+                        completeConfigWith(-100, 0),
                         "chunkSize must be between 1 and 10000"),
                 Arguments.of(
                         "chunkSize_zero",
-                        Struct.newBuilder()
-                                .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
-                                .putFields("chunkSize", Value.newBuilder().setNumberValue(0).build())
-                                .putFields("chunkOverlap", Value.newBuilder().setNumberValue(0).build())
-                                .build(),
+                        completeConfigWith(0, 0),
                         "chunkSize must be between 1 and 10000"),
                 Arguments.of(
                         "chunkOverlap_negative",
-                        Struct.newBuilder()
-                                .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
-                                .putFields("chunkSize", Value.newBuilder().setNumberValue(500).build())
-                                .putFields("chunkOverlap", Value.newBuilder().setNumberValue(-10).build())
-                                .build(),
+                        completeConfigWith(500, -10),
                         "chunkOverlap must be between 0 and 5000"),
                 Arguments.of(
                         "chunkOverlap_above_5000",
-                        Struct.newBuilder()
-                                .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
-                                .putFields("chunkSize", Value.newBuilder().setNumberValue(8000).build())
-                                .putFields("chunkOverlap", Value.newBuilder().setNumberValue(6000).build())
-                                .build(),
+                        completeConfigWith(8000, 6000),
                         "chunkOverlap must be between 0 and 5000")
         );
+    }
+
+    /**
+     * Builds a fully-populated ChunkerConfig struct with only the size/overlap
+     * pair set to malformed values. Every field of {@code ChunkerConfig} is
+     * required — partial configs now fail the ctor's null check before
+     * range validation has a chance to fire, so tests that want to exercise
+     * range rules must send a complete struct.
+     */
+    private static Struct completeConfigWith(int chunkSize, int chunkOverlap) {
+        return Struct.newBuilder()
+                .putFields("algorithm",    Value.newBuilder().setStringValue("token").build())
+                .putFields("sourceField",  Value.newBuilder().setStringValue("body").build())
+                .putFields("chunkSize",    Value.newBuilder().setNumberValue(chunkSize).build())
+                .putFields("chunkOverlap", Value.newBuilder().setNumberValue(chunkOverlap).build())
+                .putFields("preserveUrls", Value.newBuilder().setBoolValue(true).build())
+                .putFields("cleanText",    Value.newBuilder().setBoolValue(true).build())
+                .build();
     }
 
     @ParameterizedTest(name = "{0}")
@@ -250,10 +252,12 @@ class ChunkerMediumGapTest {
         // Body that's nothing but a URL. Tests the URL preservation path
         // when the URL placeholder substitution covers 100% of the source.
         Struct configWithPreserveUrls = Struct.newBuilder()
-                .putFields("algorithm", Value.newBuilder().setStringValue("token").build())
-                .putFields("chunkSize", Value.newBuilder().setNumberValue(500).build())
+                .putFields("algorithm",    Value.newBuilder().setStringValue("token").build())
+                .putFields("sourceField",  Value.newBuilder().setStringValue("body").build())
+                .putFields("chunkSize",    Value.newBuilder().setNumberValue(500).build())
                 .putFields("chunkOverlap", Value.newBuilder().setNumberValue(50).build())
                 .putFields("preserveUrls", Value.newBuilder().setBoolValue(true).build())
+                .putFields("cleanText",    Value.newBuilder().setBoolValue(true).build())
                 .build();
 
         NamedChunkerConfig chunker = NamedChunkerConfig.newBuilder()

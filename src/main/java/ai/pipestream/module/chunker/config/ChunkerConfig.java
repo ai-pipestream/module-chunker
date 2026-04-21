@@ -1,25 +1,29 @@
 package ai.pipestream.module.chunker.config;
 
+import ai.pipestream.module.chunker.examples.SampleDocuments;
+import ai.pipestream.module.chunker.model.ChunkingAlgorithm;
 import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import ai.pipestream.module.chunker.model.ChunkingAlgorithm;
-import ai.pipestream.module.chunker.examples.SampleDocuments;
 import io.quarkus.runtime.annotations.RegisterForReflection;
-import org.eclipse.microprofile.openapi.annotations.media.Schema;
-import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
 
 /**
- * Configuration record for chunker service.
- * This record serves as the single source of truth for chunker configuration schema.
- * The OpenAPI schema is auto-generated from this Java record.
- * This should generate
+ * Typed parse of a {@code NamedChunkerConfig}'s embedded config {@link com.google.protobuf.Struct}.
+ *
+ * <p><b>Every caller-visible field is required.</b> There are no defaults, no
+ * null-substitution, no {@code createDefault()} factory. If a caller sends a
+ * config struct without one of these fields set, the constructor throws
+ * {@link IllegalArgumentException} — which {@code ConfigParser} converts into
+ * an {@code INVALID_ARGUMENT} outcome for the request. Defaults are the
+ * caller's responsibility, not this module's.
  */
 @RegisterForReflection
 @Schema(
-    name = "ChunkerConfig", 
-    description = "Configuration for text chunking operations with embedded sample documents for testing",
+    name = "ChunkerConfig",
+    description = "Configuration for text chunking operations; every field is required.",
     examples = {
         SampleDocuments.US_CONSTITUTION_PREAMBLE,
         SampleDocuments.TECHNICAL_DOCUMENTATION,
@@ -27,14 +31,12 @@ import jakarta.validation.constraints.NotNull;
     }
 )
 public record ChunkerConfig(
-    
+
     @JsonProperty("algorithm")
     @Schema(
-        description = "Chunking algorithm to use for splitting text", 
-        enumeration = {"character", "token", "sentence", "semantic"}, 
-        defaultValue = "token",
-        required = true,
-        examples = {"character", "sentence"}
+        description = "Chunking algorithm to use for splitting text",
+        enumeration = {"character", "token", "sentence", "semantic"},
+        required = true
     )
     @NotNull
     ChunkingAlgorithm algorithm,
@@ -43,20 +45,18 @@ public record ChunkerConfig(
     @JsonAlias("source_field")
     @Schema(
         description = "Document field to extract text from for chunking",
-        defaultValue = "body",
-        examples = {"body", "title", "metadata.summary", "content.text"}
+        required = true
     )
+    @NotNull
     String sourceField,
 
     @JsonProperty("chunkSize")
     @JsonAlias("chunk_size")
     @Schema(
-        description = "Target size for each chunk (characters for 'character' algorithm, tokens for 'token' algorithm, sentences for 'sentence' algorithm)",
+        description = "Target size for each chunk (characters for 'character', tokens for 'token', sentences for 'sentence')",
         minimum = "1",
         maximum = "10000",
-        defaultValue = "500",
-        required = true,
-        examples = {"300", "500", "1000", "1500", "10"}
+        required = true
     )
     @NotNull @Min(1) @Max(10000)
     Integer chunkSize,
@@ -67,142 +67,55 @@ public record ChunkerConfig(
         description = "Amount of overlap between consecutive chunks (same units as chunkSize)",
         minimum = "0",
         maximum = "5000",
-        defaultValue = "50",
-        examples = {"0", "25", "50", "100", "200", "3"}
+        required = true
     )
-    @Min(0) @Max(5000)
+    @NotNull @Min(0) @Max(5000)
     Integer chunkOverlap,
 
     @JsonProperty("preserveUrls")
     @JsonAlias("preserve_urls")
-    @Schema(
-        description = "Whether to preserve URLs as atomic units during chunking to maintain readability",
-        defaultValue = "true"
-    )
+    @Schema(description = "Whether to preserve URLs as atomic units during chunking", required = true)
+    @NotNull
     Boolean preserveUrls,
 
     @JsonProperty("cleanText")
     @JsonAlias("clean_text")
-    @Schema(
-        description = "Whether to clean text by normalizing whitespace and line endings before chunking",
-        defaultValue = "true"
-    )
+    @Schema(description = "Whether to normalise whitespace and line endings before chunking", required = true)
+    @NotNull
     Boolean cleanText
 ) {
-    
-    // Default values as constants
-    public static final ChunkingAlgorithm DEFAULT_ALGORITHM = ChunkingAlgorithm.TOKEN;
-    public static final String DEFAULT_SOURCE_FIELD = "body";
-    public static final Integer DEFAULT_CHUNK_SIZE = 500;
-    public static final Integer DEFAULT_CHUNK_OVERLAP = 50;
-    public static final Boolean DEFAULT_PRESERVE_URLS = true;
-    public static final Boolean DEFAULT_CLEAN_TEXT = true;
 
-    /**
-     * Compact canonical constructor: apply defaults when null.
-     */
-    public ChunkerConfig(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap, Boolean preserveUrls, Boolean cleanText) {
-        this.algorithm = algorithm != null ? algorithm : DEFAULT_ALGORITHM;
-        this.sourceField = sourceField != null ? sourceField : DEFAULT_SOURCE_FIELD;
-        this.chunkSize = chunkSize != null ? chunkSize : DEFAULT_CHUNK_SIZE;
-        this.chunkOverlap = chunkOverlap != null ? chunkOverlap : DEFAULT_CHUNK_OVERLAP;
-        this.preserveUrls = preserveUrls != null ? preserveUrls : DEFAULT_PRESERVE_URLS;
-        this.cleanText = cleanText != null ? cleanText : DEFAULT_CLEAN_TEXT;
+    public ChunkerConfig {
+        if (algorithm == null)    throw new IllegalArgumentException("ChunkerConfig.algorithm is required");
+        if (sourceField == null)  throw new IllegalArgumentException("ChunkerConfig.sourceField is required");
+        if (chunkSize == null)    throw new IllegalArgumentException("ChunkerConfig.chunkSize is required");
+        if (chunkOverlap == null) throw new IllegalArgumentException("ChunkerConfig.chunkOverlap is required");
+        if (preserveUrls == null) throw new IllegalArgumentException("ChunkerConfig.preserveUrls is required");
+        if (cleanText == null)    throw new IllegalArgumentException("ChunkerConfig.cleanText is required");
     }
 
     /**
-     * Constructor with defaults (backwards compatibility).
-     */
-    public ChunkerConfig(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap, Boolean preserveUrls) {
-        this(algorithm, sourceField, chunkSize, chunkOverlap, preserveUrls, DEFAULT_CLEAN_TEXT);
-    }
-
-    /**
-     * Creates a default configuration with standard settings.
-     */
-    public static ChunkerConfig createDefault() {
-        return new ChunkerConfig(
-            DEFAULT_ALGORITHM,
-            DEFAULT_SOURCE_FIELD,
-            DEFAULT_CHUNK_SIZE,
-            DEFAULT_CHUNK_OVERLAP,
-            DEFAULT_PRESERVE_URLS,
-            DEFAULT_CLEAN_TEXT
-        );
-    }
-
-    /**
-     * Creates a configuration from basic parameters.
-     */
-    public static ChunkerConfig create(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap, Boolean preserveUrls) {
-        return new ChunkerConfig(algorithm, sourceField, chunkSize, chunkOverlap, preserveUrls, DEFAULT_CLEAN_TEXT);
-    }
-
-    /**
-     * Creates a configuration from basic parameters (full version).
-     */
-    public static ChunkerConfig create(ChunkingAlgorithm algorithm, String sourceField, Integer chunkSize, Integer chunkOverlap, Boolean preserveUrls, Boolean cleanText) {
-        return new ChunkerConfig(algorithm, sourceField, chunkSize, chunkOverlap, preserveUrls, cleanText);
-    }
-
-    /**
-     * Validates the configuration and returns any validation errors.
-     * @return null if valid, error message if invalid
+     * Validates structural invariants. Returns {@code null} if valid, an error
+     * string otherwise. Null / missing fields are already rejected by the
+     * canonical constructor, so this only checks cross-field rules.
      */
     public String validate() {
-        if (chunkSize != null && (chunkSize < 1 || chunkSize > 10000)) {
+        if (chunkSize < 1 || chunkSize > 10000) {
             return "chunkSize must be between 1 and 10000";
         }
-        if (chunkOverlap != null && (chunkOverlap < 0 || chunkOverlap > 5000)) {
+        if (chunkOverlap < 0 || chunkOverlap > 5000) {
             return "chunkOverlap must be between 0 and 5000";
         }
-        if (chunkOverlap != null && chunkSize != null && chunkOverlap >= chunkSize) {
+        if (chunkOverlap >= chunkSize) {
             return "chunkOverlap must be less than chunkSize";
         }
         if (algorithm == ChunkingAlgorithm.SEMANTIC) {
-            return "Semantic chunking is not yet implemented";
+            return "Semantic chunking is not implemented";
         }
-        return null; // No errors
+        return null;
     }
 
-    /**
-     * Returns true if this configuration is valid.
-     */
     public boolean isValid() {
         return validate() == null;
-    }
-
-    /**
-     * Gets the chunk size with appropriate units based on algorithm.
-     */
-    @Schema(
-        description = "Human-readable description of chunk size with appropriate units based on the selected algorithm",
-        readOnly = true,
-        examples = {"500 tokens", "1000 characters", "3 sentences"}
-    )
-    public String getChunkSizeDescription() {
-        return switch (algorithm) {
-            case CHARACTER -> chunkSize + " characters";
-            case TOKEN -> chunkSize + " tokens";
-            case SENTENCE -> chunkSize + " sentences";
-            case SEMANTIC -> chunkSize + " characters (semantic boundaries)";
-        };
-    }
-
-    /**
-     * Gets the overlap description with appropriate units based on algorithm.
-     */
-    @Schema(
-        description = "Human-readable description of chunk overlap with appropriate units based on the selected algorithm",
-        readOnly = true,
-        examples = {"50 tokens", "100 characters", "1 sentence"}
-    )
-    public String getChunkOverlapDescription() {
-        return switch (algorithm) {
-            case CHARACTER -> chunkOverlap + " characters";
-            case TOKEN -> chunkOverlap + " tokens";
-            case SENTENCE -> chunkOverlap + " sentences";
-            case SEMANTIC -> chunkOverlap + " characters (semantic overlap)";
-        };
     }
 }

@@ -120,13 +120,22 @@ public final class TestDirectiveBuilder {
         return VectorSetDirectives.newBuilder().addDirectives(directive).build();
     }
 
-    /** Builds a {@link NamedChunkerConfig} from primitive parameters. */
+    /**
+     * Builds a fully-populated {@link NamedChunkerConfig}. {@code ChunkerConfig}
+     * requires every field; test helpers must not send partial structs. The
+     * {@code sourceField} carried here is a placeholder — {@code ConfigParser}
+     * overwrites it with the directive's {@code source_label} before the
+     * chunker sees it.
+     */
     public static NamedChunkerConfig namedChunkerConfig(
             String configId, String algorithm, int chunkSize, int overlap) {
         Struct configStruct = Struct.newBuilder()
-                .putFields("algorithm", Value.newBuilder().setStringValue(algorithm).build())
-                .putFields("chunkSize", Value.newBuilder().setNumberValue(chunkSize).build())
+                .putFields("algorithm",    Value.newBuilder().setStringValue(algorithm).build())
+                .putFields("sourceField",  Value.newBuilder().setStringValue("body").build())
+                .putFields("chunkSize",    Value.newBuilder().setNumberValue(chunkSize).build())
                 .putFields("chunkOverlap", Value.newBuilder().setNumberValue(overlap).build())
+                .putFields("preserveUrls", Value.newBuilder().setBoolValue(true).build())
+                .putFields("cleanText",    Value.newBuilder().setBoolValue(true).build())
                 .build();
         return NamedChunkerConfig.newBuilder()
                 .setConfigId(configId)
