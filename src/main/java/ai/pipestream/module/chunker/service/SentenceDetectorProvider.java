@@ -13,11 +13,10 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Provider for OpenNLP SentenceDetector model and instances.
+ * Provider for OpenNLP sentence model and a shared {@link SentenceDetectorME}.
  * <p>
- * SentenceDetectorME is NOT thread-safe (mutable internal state: sentProbs list).
- * The SentenceModel IS thread-safe. Callers needing concurrency should
- * call {@link #getModel()} and create their own SentenceDetectorME per thread.
+ * With OpenNLP 3.0.0-SNAPSHOT+, {@code SentenceDetectorME} is thread-safe; this module
+ * exposes one instance (or a single stateless fallback) for the application.
  */
 @ApplicationScoped
 public class SentenceDetectorProvider {
@@ -51,10 +50,7 @@ public class SentenceDetectorProvider {
         };
     }
 
-    /**
-     * Produces a singleton SentenceDetector for simple single-threaded use.
-     * Do NOT share across concurrent threads — use {@link #getModel()} instead.
-     */
+    /** Application-wide sentence detector (model-backed {@link SentenceDetectorME} or fallback). */
     @Produces
     @Singleton
     public SentenceDetector createSentenceDetector() {
@@ -66,10 +62,7 @@ public class SentenceDetectorProvider {
         return createFallbackDetector();
     }
 
-    /**
-     * Returns the thread-safe SentenceModel, or null if unavailable.
-     * Create a new {@code new SentenceDetectorME(model)} per thread for concurrent use.
-     */
+    /** Returns the loaded {@link SentenceModel}, or null if unavailable. */
     public SentenceModel getModel() {
         if (sentenceModel == null) {
             synchronized (this) {

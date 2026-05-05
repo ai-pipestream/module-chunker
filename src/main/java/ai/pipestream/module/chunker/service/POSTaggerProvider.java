@@ -12,9 +12,10 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Provider for OpenNLP POS Tagger model and instances.
- * Loads the English POS model once from the Maven model artifact.
- * Exposes the POSModel (thread-safe) so callers can create per-thread POSTaggerME instances.
+ * Provider for OpenNLP POS model and a shared {@link POSTaggerME}.
+ * <p>
+ * With OpenNLP 3.0.0-SNAPSHOT+, {@code POSTaggerME} is thread-safe; this module
+ * exposes one tagger for the application (or null if the model is missing).
  */
 @ApplicationScoped
 public class POSTaggerProvider {
@@ -24,9 +25,7 @@ public class POSTaggerProvider {
 
     private volatile POSModel posModel;
 
-    /**
-     * Produces a singleton POSTagger for simple single-threaded use.
-     */
+    /** Application-wide POS tagger, or null when the model is not on the classpath. */
     @Produces
     @Singleton
     public POSTagger createPOSTagger() {
@@ -34,10 +33,7 @@ public class POSTaggerProvider {
         return model != null ? new POSTaggerME(model) : null;
     }
 
-    /**
-     * Returns the thread-safe POSModel, or null if unavailable.
-     * Callers needing thread-safety should create their own POSTaggerME(model) per thread.
-     */
+    /** Returns the loaded {@link POSModel}, or null if unavailable. */
     public POSModel getModel() {
         if (posModel == null) {
             synchronized (this) {

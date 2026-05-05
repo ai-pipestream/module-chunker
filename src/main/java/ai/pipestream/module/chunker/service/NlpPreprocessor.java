@@ -1,21 +1,15 @@
 package ai.pipestream.module.chunker.service;
 
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import opennlp.tools.langdetect.Language;
 import opennlp.tools.langdetect.LanguageDetector;
 import opennlp.tools.lemmatizer.Lemmatizer;
-import opennlp.tools.postag.POSModel;
 import opennlp.tools.postag.POSTagger;
-import opennlp.tools.postag.POSTaggerME;
 import opennlp.tools.sentdetect.SentenceDetector;
-import opennlp.tools.sentdetect.SentenceDetectorME;
-import opennlp.tools.sentdetect.SentenceModel;
-import opennlp.tools.tokenize.SimpleTokenizer;
 import opennlp.tools.tokenize.Tokenizer;
-import opennlp.tools.tokenize.TokenizerME;
-import opennlp.tools.tokenize.TokenizerModel;
 import opennlp.tools.util.Span;
 import org.jboss.logging.Logger;
 
@@ -58,8 +52,8 @@ public class NlpPreprocessor {
     /** Sentinel value returned by DictionaryLemmatizer for unknown words. */
     private static final String LEMMA_UNKNOWN = "O";
 
-    /** Number of virtual threads for parallel sentence tagging. */
-    private static final int PARALLELISM = Runtime.getRuntime().availableProcessors();
+    /** Shared executor for parallel per-sentence POS/lemmatize (virtual thread per task). */
+    private final ExecutorService parallelSentenceExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     /** NLP result cache keyed by SHA-256 of text content. Avoids redundant NLP processing
      *  when the semantic manager sends multiple chunking passes for the same document text. */
@@ -68,41 +62,30 @@ public class NlpPreprocessor {
             .expireAfterWrite(Duration.ofMinutes(5))
             .build();
 
-    private final TokenizerProvider tokenizerProvider;
-    private final SentenceDetectorProvider sentenceDetectorProvider;
+    private final Tokenizer tokenizer;
+    private final SentenceDetector sentenceDetector;
+    private final Instance<POSTagger> posTaggerInstance;
     private final Instance<Lemmatizer> lemmatizerInstance;
     private final Instance<LanguageDetector> languageDetectorInstance;
-    private final POSTaggerProvider posTaggerProvider;
 
     @Inject
     public NlpPreprocessor(
-            TokenizerProvider tokenizerProvider,
-            SentenceDetectorProvider sentenceDetectorProvider,
+            Tokenizer tokenizer,
+            SentenceDetector sentenceDetector,
+            Instance<POSTagger> posTaggerInstance,
             Instance<Lemmatizer> lemmatizerInstance,
-            Instance<LanguageDetector> languageDetectorInstance,
-            POSTaggerProvider posTaggerProvider) {
-        this.tokenizerProvider = tokenizerProvider;
-        this.sentenceDetectorProvider = sentenceDetectorProvider;
+            Instance<LanguageDetector> languageDetectorInstance) {
+        this.tokenizer = tokenizer;
+        this.sentenceDetector = sentenceDetector;
+        this.posTaggerInstance = posTaggerInstance;
         this.lemmatizerInstance = lemmatizerInstance;
         this.languageDetectorInstance = languageDetectorInstance;
-        this.posTaggerProvider = posTaggerProvider;
-        LOG.infof("NlpPreprocessor initialized with parallelism=%d", PARALLELISM);
+        LOG.info("NlpPreprocessor initialized (shared virtual-thread executor for parallel sentence NLP)");
     }
 
-    /**
-     * Creates a thread-local Tokenizer instance. TokenizerME is NOT thread-safe.
-     */
-    private Tokenizer createTokenizer() {
-        TokenizerModel model = tokenizerProvider.getModel();
-        return model != null ? new TokenizerME(model) : SimpleTokenizer.INSTANCE;
-    }
-
-    /**
-     * Creates a thread-local SentenceDetector instance. SentenceDetectorME is NOT thread-safe.
-     */
-    private SentenceDetector createSentenceDetector() {
-        SentenceModel model = sentenceDetectorProvider.getModel();
-        return model != null ? new SentenceDetectorME(model) : sentenceDetectorProvider.createSentenceDetector();
+    @PreDestroy
+    void shutdownParallelExecutor() {
+        parallelSentenceExecutor.shutdown();
     }
 
     /**
@@ -188,11 +171,7 @@ public class NlpPreprocessor {
     }
 
     private NlpResult preprocessUncached(String text) {
-        // Create per-call instances — TokenizerME and SentenceDetectorME are NOT thread-safe.
-        // They have mutable internal state (newTokens list, sentProbs list) that corrupts
-        // under concurrent access, producing null spans and text bleeding between documents.
-        Tokenizer tokenizer = createTokenizer();
-        SentenceDetector sentenceDetector = createSentenceDetector();
+        // Shared OpenNLP *ME singletons (thread-safe from 3.0.0-SNAPSHOT+).
 
         // Step 1: Tokenization — call tokenizePos() FIRST (returns Span[]),
         // then derive token strings manually. Do NOT call tokenize() — it internally
@@ -360,13 +339,14 @@ public class NlpPreprocessor {
     private record SentenceWork(int firstTokenIdx, int tokenCount, String[] sentTokens) {}
 
     /**
-     * POS tags and lemmatizes tokens per sentence, using parallel virtual threads.
+     * POS tags and lemmatizes tokens per sentence, using parallel virtual threads when
+     * there are many sentences.
      * <p>
      * POSTaggerME uses Viterbi beam search — O(n × k²) per sequence. Tagging 800K tokens
      * as one sequence takes minutes; tagging 30K sentences of ~25 tokens each takes seconds.
      * <p>
-     * POSTaggerME is NOT thread-safe (stores bestSequence as instance state), so each virtual
-     * thread creates its own tagger from the shared thread-safe POSModel.
+     * One shared {@link POSTagger} and {@link Lemmatizer} are used across virtual threads
+     * (OpenNLP 3.0.0-SNAPSHOT+ thread-safe ME implementations).
      */
     private void tagAndLemmatizePerSentence(String text, String[] sentences, Span[] sentenceSpans,
                                              String[] tokens, Span[] tokenSpans,
@@ -377,13 +357,13 @@ public class NlpPreprocessor {
             lemmas[i] = tokens[i];
         }
 
-        POSModel model = posTaggerProvider.getModel();
+        POSTagger sharedTagger = posTaggerInstance.isResolvable() ? posTaggerInstance.get() : null;
         Lemmatizer sharedLemmatizer = null;
         if (lemmatizerInstance.isResolvable()) {
             sharedLemmatizer = lemmatizerInstance.get();
         }
 
-        if (model == null && sharedLemmatizer == null) {
+        if (sharedTagger == null && sharedLemmatizer == null) {
             return;
         }
 
@@ -415,27 +395,23 @@ public class NlpPreprocessor {
 
         // For small documents (< 100 sentences), process sequentially — no thread overhead
         if (sentenceSpans.length < 100) {
-            POSTagger tagger = model != null ? new POSTaggerME(model) : null;
             for (SentenceWork sw : work) {
-                tagAndLemmatizeSentence(sw, tagger, sharedLemmatizer, posTags, lemmas);
+                tagAndLemmatizeSentence(sw, sharedTagger, sharedLemmatizer, posTags, lemmas);
             }
             return;
         }
 
-        // For large documents, parallel process with virtual threads.
-        // Each thread gets its own POSTaggerME (not thread-safe) from shared POSModel (thread-safe).
-        final POSModel finalModel = model;
+        // For large documents, parallel process with virtual threads (shared ME tagger/lemmatizer).
+        final POSTagger finalTagger = sharedTagger;
         final Lemmatizer finalLemmatizer = sharedLemmatizer;
 
         LOG.infof("Parallel NLP: %d sentences across virtual threads", sentenceSpans.length);
-        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        try {
             List<Future<?>> futures = new ArrayList<>();
             for (SentenceWork sw : work) {
                 if (sw.tokenCount == 0) continue;
-                futures.add(executor.submit(() -> {
-                    // Each virtual thread gets its own POSTaggerME — not thread-safe
-                    POSTagger threadTagger = finalModel != null ? new POSTaggerME(finalModel) : null;
-                    tagAndLemmatizeSentence(sw, threadTagger, finalLemmatizer, posTags, lemmas);
+                futures.add(parallelSentenceExecutor.submit(() -> {
+                    tagAndLemmatizeSentence(sw, finalTagger, finalLemmatizer, posTags, lemmas);
                 }));
             }
             for (Future<?> f : futures) {
