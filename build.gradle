@@ -78,8 +78,10 @@ dependencies {
     // Protobuf JSON utilities
     implementation 'com.google.protobuf:protobuf-java-util'
 
-    // OpenNLP 3.0.0-M1 runtime + model artifacts
-    implementation libs.opennlp.runtime
+    // OpenNLP: pin 3.0.0-SNAPSHOT until 3.0 GA. ME (*ME) thread-safety landed pre-GA in OpenNLP
+    // and is covered by upstream tests; this module will move to shared ME singletons next.
+    // Model JARs stay on the BOM catalog (compatible with 3.0.x runtime).
+    implementation 'org.apache.opennlp:opennlp-runtime:3.0.0-SNAPSHOT'
     implementation libs.opennlp.models.tokenizer.en
     implementation libs.opennlp.models.sentdetect.en
     implementation libs.opennlp.models.pos.en

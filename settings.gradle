@@ -37,5 +37,16 @@ dependencyResolutionManagement {
                 includeGroupByRegex "ai\\.pipestream(\\..*)?"
             }
         }
+
+        // Apache OpenNLP 3.0.0-SNAPSHOT (ME thread-safety lands pre-GA)
+        maven {
+            url = uri('https://repository.apache.org/content/repositories/snapshots/')
+            mavenContent {
+                snapshotsOnly()
+            }
+            content {
+                includeGroup 'org.apache.opennlp'
+            }
+        }
     }
 }

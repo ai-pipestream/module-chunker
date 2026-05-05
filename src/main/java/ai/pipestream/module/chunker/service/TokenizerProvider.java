@@ -13,11 +13,10 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Provider for OpenNLP Tokenizer model and instances.
+ * Provider for OpenNLP tokenizer model and a shared {@link TokenizerME}.
  * <p>
- * TokenizerME is NOT thread-safe (mutable internal state: newTokens list).
- * The TokenizerModel IS thread-safe. Callers needing concurrency should
- * call {@link #getModel()} and create their own TokenizerME per thread.
+ * With OpenNLP 3.0.0-SNAPSHOT+, {@code TokenizerME} is thread-safe; this module
+ * exposes one instance for the whole application.
  */
 @ApplicationScoped
 public class TokenizerProvider {
@@ -27,10 +26,7 @@ public class TokenizerProvider {
 
     private volatile TokenizerModel tokenizerModel;
 
-    /**
-     * Produces a singleton Tokenizer for simple single-threaded use (e.g., REST endpoints).
-     * Do NOT share across concurrent threads — use {@link #getModel()} instead.
-     */
+    /** Application-wide tokenizer (UD model-backed {@link TokenizerME}, or {@link SimpleTokenizer}). */
     @Produces
     @Singleton
     public Tokenizer createTokenizer() {
@@ -42,10 +38,7 @@ public class TokenizerProvider {
         return SimpleTokenizer.INSTANCE;
     }
 
-    /**
-     * Returns the thread-safe TokenizerModel, or null if unavailable.
-     * Create a new {@code new TokenizerME(model)} per thread for concurrent use.
-     */
+    /** Returns the loaded {@link TokenizerModel}, or null if unavailable. */
     public TokenizerModel getModel() {
         if (tokenizerModel == null) {
             synchronized (this) {

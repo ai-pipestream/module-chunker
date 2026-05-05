@@ -12,9 +12,8 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Provider for OpenNLP Language Detector.
- * Loads the language detection model from the Maven model artifact on the classpath.
- * Returns null if the model is unavailable (graceful degradation).
+ * Provider for OpenNLP language detection: loads the model once and exposes a shared
+ * {@link LanguageDetectorME}. With OpenNLP 3.0.0-SNAPSHOT+, {@code LanguageDetectorME} is thread-safe.
  */
 @ApplicationScoped
 public class LanguageDetectorProvider {
@@ -22,25 +21,28 @@ public class LanguageDetectorProvider {
     private static final Logger LOG = Logger.getLogger(LanguageDetectorProvider.class);
     private static final String MODEL_PATH = "langdetect-183.bin";
 
-    /**
-     * Produces a singleton instance of the OpenNLP Language Detector.
-     *
-     * @return A LanguageDetector instance, or null if the model is unavailable
-     */
+    private volatile LanguageDetector languageDetector;
+
     @Produces
     @Singleton
     public LanguageDetector createLanguageDetector() {
-        try (InputStream modelIn = Thread.currentThread().getContextClassLoader().getResourceAsStream(MODEL_PATH)) {
-            if (modelIn == null) {
-                LOG.warn("Language detector model not found at " + MODEL_PATH + ". Language detection will be unavailable.");
-                return null;
+        if (languageDetector == null) {
+            synchronized (this) {
+                if (languageDetector == null) {
+                    try (InputStream modelIn = Thread.currentThread().getContextClassLoader().getResourceAsStream(MODEL_PATH)) {
+                        if (modelIn == null) {
+                            LOG.warn("Language detector model not found at " + MODEL_PATH + ". Language detection will be unavailable.");
+                            return null;
+                        }
+                        LanguageDetectorModel model = new LanguageDetectorModel(modelIn);
+                        languageDetector = new LanguageDetectorME(model);
+                        LOG.info("Loaded OpenNLP language detector model");
+                    } catch (IOException e) {
+                        LOG.error("Error loading language detector model", e);
+                    }
+                }
             }
-
-            LanguageDetectorModel model = new LanguageDetectorModel(modelIn);
-            return new LanguageDetectorME(model);
-        } catch (IOException e) {
-            LOG.error("Error loading language detector model", e);
-            return null;
         }
+        return languageDetector;
     }
 }
