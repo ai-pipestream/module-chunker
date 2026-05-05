@@ -43,10 +43,6 @@ import java.util.stream.Collectors;
  * concatenated string, then base64url-encoded (URL-safe alphabet, no {@code =}
  * padding). This produces a 43-character string.
  *
- * <p>The public {@link #sha256b64url(String)} helper is also used by
- * {@link ai.pipestream.module.chunker.cache.ChunkCacheService} for
- * computing chunk cache keys.
- *
  * <p>This class has no mutable state and is safe for concurrent use.
  */
 public final class DirectiveKeyComputer {
@@ -86,9 +82,7 @@ public final class DirectiveKeyComputer {
      * Computes the SHA-256 hash of {@code input} (UTF-8 encoded) and returns it
      * as a URL-safe base64 string without {@code =} padding.
      *
-     * <p>This is the shared hash primitive used both for directive keys
-     * (by this class) and for cache keys
-     * (by {@link ai.pipestream.module.chunker.cache.ChunkCacheService}).
+     * <p>This is the shared hash primitive used for directive keys.
      *
      * @param input the string to hash; must not be {@code null}
      * @return a 43-character base64url string (no padding)

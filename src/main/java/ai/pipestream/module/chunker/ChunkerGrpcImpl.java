@@ -5,7 +5,6 @@ import com.google.protobuf.Struct;
 import com.google.protobuf.Value;
 import com.google.protobuf.util.JsonFormat;
 
-import ai.pipestream.module.chunker.cache.ChunkCacheService;
 import ai.pipestream.module.chunker.config.ChunkerConfig;
 import ai.pipestream.module.chunker.config.ChunkerStepOptions;
 import ai.pipestream.module.chunker.directive.DirectiveKeyComputer;
@@ -103,9 +102,6 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
     ChunkMetadataExtractor metadataExtractor;
 
     @Inject
-    ChunkCacheService cacheService;
-
-    @Inject
     SchemaExtractorService schemaExtractorService;
 
     @Inject
@@ -168,9 +164,8 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
             try {
                 String jsonStr = JsonFormat.printer().print(jsonConfig);
                 options = objectMapper.readValue(jsonStr, ChunkerStepOptions.class);
-                LOG.debugf("Parsed ChunkerStepOptions: cacheEnabled=%b ttlSeconds=%d (always_emit_sentences is ignored per §21.9)",
-                        options.effectiveCacheEnabled(),
-                        options.effectiveCacheTtlSeconds());
+                LOG.debugf("Parsed ChunkerStepOptions: alwaysEmitSentences=%b",
+                        options.effectiveAlwaysEmitSentences());
             } catch (Exception e) {
                 String msg = "Invalid ChunkerStepOptions JSON: " + e.getMessage();
                 LOG.errorf("INVALID_ARGUMENT: %s", msg);
@@ -525,39 +520,16 @@ public class ChunkerGrpcImpl implements PipeStepProcessorService {
         // pure CPU step with no I/O — no need to defer it into chain().
         final ChunkerConfig perConfigChunkerConfig = parseNamedChunkerConfig(namedConfig, sourceLabel);
 
-        // Chunker execution + SemanticChunk build, callable in two places
-        // (cache miss, and the cache-disabled path).
+        // Chunker execution + SemanticChunk build. Defer the synchronous
+        // run inside Uni.createFrom().item(supplier) so any thrown exception
+        // lands on the Uni's failure channel (not as a synchronous throw at
+        // the call site).
         final java.util.function.Supplier<List<SemanticChunk>> runChunker = () ->
                 buildChunksForConfig(inputDoc, docHash, sourceText, nlpResult,
                         sourceLabel, chunkerConfigId, perConfigChunkerConfig,
                         streamId, pipeStepName, logs);
 
-        final Uni<List<SemanticChunk>> chunksUni;
-        if (options.effectiveCacheEnabled()) {
-            chunksUni = cacheService.get(sourceText, chunkerConfigId)
-                    .chain(cached -> {
-                        if (cached != null && !cached.isEmpty()) {
-                            LOG.debugf("Chunk cache HIT for source_label='%s' config_id='%s' — %d chunk(s)",
-                                    sourceLabel, chunkerConfigId, cached.size());
-                            logs.add(moduleLog(
-                                    "Cache HIT for source_label='" + sourceLabel
-                                            + "' config_id='" + chunkerConfigId
-                                            + "': reusing " + cached.size() + " cached chunk(s)",
-                                    LogLevel.LOG_LEVEL_DEBUG));
-                            return Uni.createFrom().item(cached);
-                        }
-                        // Cache miss — run chunker synchronously, then write back
-                        // and replace the Uni's item with the fresh chunks.
-                        List<SemanticChunk> freshChunks = runChunker.get();
-                        return cacheService.put(sourceText, chunkerConfigId, freshChunks,
-                                        options.effectiveCacheTtlSeconds(), false)
-                                .replaceWith(freshChunks);
-                    });
-        } else {
-            // No cache: defer the chunker run so any thrown exception lands on
-            // the Uni's failure channel (not as a synchronous throw at call site).
-            chunksUni = Uni.createFrom().item(runChunker);
-        }
+        final Uni<List<SemanticChunk>> chunksUni = Uni.createFrom().item(runChunker);
 
         return chunksUni.map(chunks -> {
             // Build SPR with deterministic result_id and directive_key stamp (§21.2, §21.5)

@@ -428,19 +428,6 @@ class ChunkerDedupGroundworkTest {
     // =========================================================================
 
     private ProcessDataResponse runProcessData(PipeDoc doc, String streamIdPrefix) {
-        // PR-K3: disable the chunk cache so each test run computes from
-        // scratch. The cache key is (sourceText, chunkerConfigId), and
-        // BODY_TEXT is a constant — without this, an entry written by an
-        // earlier test run (or an earlier branch's code) shadows the
-        // current code path's output. Cache hits would skip the new
-        // metadata-map-empty behavior and surface as confusing failures
-        // that look like the production code is still writing the loose
-        // map when in fact it isn't.
-        Struct cacheDisabledConfig = Struct.newBuilder()
-                .putFields("cache_enabled",
-                        com.google.protobuf.Value.newBuilder().setBoolValue(false).build())
-                .build();
-
         ProcessDataRequest request = ProcessDataRequest.newBuilder()
                 .setDocument(doc)
                 .setMetadata(ServiceMetadata.newBuilder()
@@ -450,7 +437,7 @@ class ChunkerDedupGroundworkTest {
                         .setCurrentHopNumber(1)
                         .build())
                 .setConfig(ProcessConfiguration.newBuilder()
-                        .setJsonConfig(cacheDisabledConfig)
+                        .setJsonConfig(Struct.getDefaultInstance())
                         .build())
                 .build();
 

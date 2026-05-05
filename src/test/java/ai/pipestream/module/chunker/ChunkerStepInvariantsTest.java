@@ -359,9 +359,11 @@ class ChunkerStepInvariantsTest {
                 .build();
 
         // Inject a Struct that cannot be parsed into ChunkerStepOptions because
-        // cache_enabled is set to a string value (should be boolean)
+        // always_emit_sentences is set to a string value (should be boolean).
+        // (Pre-cache-removal this used cache_enabled; with the cache gone we
+        // exercise the same invariant via a still-existing typed field.)
         Struct badConfig = Struct.newBuilder()
-                .putFields("cache_enabled",
+                .putFields("always_emit_sentences",
                         com.google.protobuf.Value.newBuilder().setStringValue("not-a-boolean").build())
                 .build();
 
